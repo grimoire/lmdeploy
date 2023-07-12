@@ -649,25 +649,25 @@ struct LlamaAttentionKernel:
 };
 
 template<typename T, typename Attention>
-void invokeFlashAttention_impl(int                                   batch_size,
-                               int                                   head_num,
-                               int                                   key_len,
-                               int                                   seq_len,
-                               int                                   size_per_head,
-                               typename FlashAttentionOp<T>::Params& attention_params,
-                               cudaStream_t                          st)
+void invokeFlashAttention_impl(int                                         batch_size,
+                               int                                         head_num,
+                               int                                         key_len,
+                               int                                         seq_len,
+                               int                                         size_per_head,
+                               typename FlashAttentionOp<T, T, T>::Params& attention_params,
+                               cudaStream_t                                st)
 {
-    T*     out_ptr          = attention_params.attn_out;
-    T*     query_ptr        = attention_params.query;
-    T*     key_ptr          = attention_params.key;
-    T*     value_ptr        = attention_params.val;
-    T*     mask_ptr         = attention_params.mask;
     float* output_accum_ptr = attention_params.out_accum;
     auto*  cu_seqlens_q_ptr = attention_params.cu_seqlens_q;
     auto   layout_q         = attention_params.layout_q;
     auto   layout_k         = attention_params.layout_k;
     auto   layout_v         = attention_params.layout_v;
     auto   layout_o         = attention_params.layout_o;
+    T*     out_ptr          = layout_o.data_ptr;
+    T*     query_ptr        = layout_q.data_ptr;
+    T*     key_ptr          = layout_k.data_ptr;
+    T*     value_ptr        = layout_v.data_ptr;
+    T*     mask_ptr         = attention_params.mask;
 
     using scalar_t =
         typename std::conditional_t<std::is_same<half, typename std::decay<T>::type>::value, cutlass::half_t, T>;
@@ -779,14 +779,14 @@ bool get_needs_accum_buffer()
 }
 
 template<typename T, int kQueriesPerBlock, int kKeysPerBlock>
-void invoke_attention_impl(bool                                  single_val_iteration,
-                           int                                   batch_size,
-                           int                                   head_num,
-                           int                                   key_len,
-                           int                                   seq_len,
-                           int                                   size_per_head,
-                           typename FlashAttentionOp<T>::Params& params,
-                           cudaStream_t                          st)
+void invoke_attention_impl(bool                                        single_val_iteration,
+                           int                                         batch_size,
+                           int                                         head_num,
+                           int                                         key_len,
+                           int                                         seq_len,
+                           int                                         size_per_head,
+                           typename FlashAttentionOp<T, T, T>::Params& params,
+                           cudaStream_t                                st)
 {
     using scalar_t =
         typename std::conditional_t<std::is_same<half, typename std::decay<T>::type>::value, cutlass::half_t, T>;
@@ -824,19 +824,19 @@ void invoke_attention_impl(bool                                  single_val_iter
 #undef INVOKE_ATTEN_IMPL
 }
 
-template<typename T>
-class FlashAttentionOp<T>::impl {
+template<typename scalar_q_t, typename scalar_k_t, typename scalar_v_t>
+class FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>::impl {
 
 private:
     static constexpr int kQueriesPerBlock = 32;
     static constexpr int kKeysPerBlock    = 128;
+    using Base                            = FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>;
     using ArchTag                         = cutlass::arch::Sm80;
-    using scalar_t =
-        typename std::conditional_t<std::is_same<half, typename std::decay<T>::type>::value, cutlass::half_t, T>;
+    using scalar_t                        = typename std::
+        conditional_t<std::is_same<half, typename std::decay<scalar_q_t>::type>::value, cutlass::half_t, scalar_q_t>;
     using SingleValueAttention = LlamaAttentionKernel<scalar_t, ArchTag, kQueriesPerBlock, kKeysPerBlock, true>;
     using MultiValueAttention  = LlamaAttentionKernel<scalar_t, ArchTag, kQueriesPerBlock, kKeysPerBlock, false>;
-    using AttentionLayout      = typename FlashAttentionOp<T>::AttentionLayout;
-    using Params               = typename FlashAttentionOp<T>::Params;
+    using Params               = typename Base::Params;
 
     int  batch_size_;
     int  head_num_;
@@ -864,7 +864,7 @@ public:
             return 0;
         }
         else {
-            bool kNeedsOutputAccumulatorBuffer = get_needs_accum_buffer<T, kQueriesPerBlock, kKeysPerBlock>();
+            bool kNeedsOutputAccumulatorBuffer = get_needs_accum_buffer<scalar_q_t, kQueriesPerBlock, kKeysPerBlock>();
             if (kNeedsOutputAccumulatorBuffer) {
                 return batch_size_ * head_num_ * seq_len_ * size_per_head_ * sizeof(float);
             }
@@ -876,35 +876,37 @@ public:
 
     void operator()(Params& params, cudaStream_t st) const
     {
-        invoke_attention_impl<T, kQueriesPerBlock, kKeysPerBlock>(
+        invoke_attention_impl<scalar_q_t, kQueriesPerBlock, kKeysPerBlock>(
             kSingleValueIteration, batch_size_, head_num_, key_len_, seq_len_, size_per_head_, params, st);
     }
 };
 
-template<typename T>
-FlashAttentionOp<T>::FlashAttentionOp(int batch_size, int head_num, int key_len, int seq_len, int size_per_head):
-    pimpl{std::make_unique<FlashAttentionOp<T>::impl>(batch_size, head_num, key_len, seq_len, size_per_head)}
+template<typename scalar_q_t, typename scalar_k_t, typename scalar_v_t>
+FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>::FlashAttentionOp(
+    int batch_size, int head_num, int key_len, int seq_len, int size_per_head):
+    pimpl{std::make_unique<FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>::impl>(
+        batch_size, head_num, key_len, seq_len, size_per_head)}
 {
 }
 
-template<typename T>
-FlashAttentionOp<T>::~FlashAttentionOp()
+template<typename scalar_q_t, typename scalar_k_t, typename scalar_v_t>
+FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>::~FlashAttentionOp()
 {
 }
 
-template<typename T>
-int FlashAttentionOp<T>::get_workspace_size() const
+template<typename scalar_q_t, typename scalar_k_t, typename scalar_v_t>
+int FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>::get_workspace_size() const
 {
     return pimpl->get_workspace_size();
 }
 
-template<typename T>
-void FlashAttentionOp<T>::operator()(Params& params, cudaStream_t st) const
+template<typename scalar_q_t, typename scalar_k_t, typename scalar_v_t>
+void FlashAttentionOp<scalar_q_t, scalar_k_t, scalar_v_t>::operator()(Params& params, cudaStream_t st) const
 {
     pimpl->operator()(params, st);
 }
 
-template class FlashAttentionOp<float>;
-template class FlashAttentionOp<half>;
+template class FlashAttentionOp<float, float, float>;
+template class FlashAttentionOp<half, half, half>;
 
 }  // namespace turbomind

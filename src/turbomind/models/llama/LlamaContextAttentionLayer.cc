@@ -47,7 +47,7 @@ void LlamaContextAttentionLayer<T>::allocateBuffer(size_t batch_size,
     v_buf_2_ = k_buf_2_ + batch_size * max_q_len * local_hidden_units_;
 
     if (use_fmha_) {
-        FlashAttentionOp<T> flash_attention(batch_size, local_head_num_, max_k_len, max_q_len, size_per_head_);
+        FlashAttentionOp<T, T, T> flash_attention(batch_size, local_head_num_, max_k_len, max_q_len, size_per_head_);
         if (flash_attention.get_workspace_size() > 0) {
             qk_buf_float_ = (float*)allocator_->reMalloc(qk_buf_float_, flash_attention.get_workspace_size(), true);
         }
@@ -256,34 +256,34 @@ void LlamaContextAttentionLayer<T>::fusedMultiHeadAttention(T**    key_cache_ptr
 {
     //////////////////////////////////////////////
     // flash attention
-    using AttentionOp = FlashAttentionOp<T>;
-    using Layout      = typename AttentionOp::AttentionLayout;
-    Layout layout_q{.stride_batch = int(local_head_num_ * max_q_len * size_per_head_),
-                    .stride_seq   = int(size_per_head_),
-                    .stride_head  = int(max_q_len * size_per_head_)};
-    Layout layout_k{.stride_batch      = int(local_head_num_ * max_seq_len * size_per_head_),
-                    .stride_seq        = int(size_per_head_),
-                    .stride_head       = int(max_seq_len * size_per_head_),
-                    .batch_seqs_offset = int(cache_layer_offset),
-                    .batch_seqs        = key_cache_ptrs};
-    Layout layout_v{.stride_batch      = int(local_head_num_ * max_seq_len * size_per_head_),
-                    .stride_seq        = int(size_per_head_),
-                    .stride_head       = int(max_seq_len * size_per_head_),
-                    .batch_seqs_offset = int(cache_layer_offset),
-                    .batch_seqs        = val_cache_ptrs};
-    Layout layout_o{
-        .stride_batch = int(local_head_num_ * max_q_len * size_per_head_),
-        .stride_seq   = int(local_head_num_ * size_per_head_),
-        .stride_head  = int(size_per_head_),
-        .use_seqlens  = true,
+    using AttentionOp = FlashAttentionOp<T, T, T>;
+    // using Layout      = typename AttentionOp::AttentionLayout<T>;
+    typename AttentionOp::QueryLayout layout_q{.data_ptr     = q_buf_2_,
+                                               .stride_batch = int(local_head_num_ * max_q_len * size_per_head_),
+                                               .stride_seq   = int(size_per_head_),
+                                               .stride_head  = int(max_q_len * size_per_head_)};
+    typename AttentionOp::KeyLayout   layout_k{.data_ptr          = k_cache_buf_,
+                                               .stride_batch      = int(local_head_num_ * max_seq_len * size_per_head_),
+                                               .stride_seq        = int(size_per_head_),
+                                               .stride_head       = int(max_seq_len * size_per_head_),
+                                               .batch_seqs_offset = int(cache_layer_offset),
+                                               .batch_seqs        = key_cache_ptrs};
+    typename AttentionOp::ValueLayout layout_v{.data_ptr          = v_cache_buf_,
+                                               .stride_batch      = int(local_head_num_ * max_seq_len * size_per_head_),
+                                               .stride_seq        = int(size_per_head_),
+                                               .stride_head       = int(max_seq_len * size_per_head_),
+                                               .batch_seqs_offset = int(cache_layer_offset),
+                                               .batch_seqs        = val_cache_ptrs};
+    typename AttentionOp::OutLayout   layout_o{
+          .data_ptr     = qkv_buf_3_,
+          .stride_batch = int(local_head_num_ * max_q_len * size_per_head_),
+          .stride_seq   = int(local_head_num_ * size_per_head_),
+          .stride_head  = int(size_per_head_),
+          .use_seqlens  = true,
     };
     AttentionOp flash_attention(batch_size, local_head_num_, max_k_len, max_q_len, size_per_head_);
 
-    typename AttentionOp::Params attn_params{.attn_out     = qkv_buf_3_,
-                                             .query        = q_buf_2_,
-                                             .key          = k_cache_buf_,
-                                             .val          = v_cache_buf_,
-                                             .mask         = attention_mask,
+    typename AttentionOp::Params attn_params{.mask         = attention_mask,
                                              .out_accum    = qk_buf_float_,
                                              .cu_seqlens_q = cu_seqlens,
                                              .cu_seqlens_k = nullptr,

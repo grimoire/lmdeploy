@@ -334,29 +334,28 @@ int main(int argc, const char* argv[])
                         &cublas_wrapper);
 
     // compute actual
-    using AttentionOp = FlashAttentionOp<scalar_t>;
-    using Layout      = typename AttentionOp::AttentionLayout;
-    Layout      layout_q{.stride_batch = num_heads * seq_len * size_per_head,
-                         .stride_seq   = size_per_head,
-                         .stride_head  = seq_len * size_per_head};
-    Layout      layout_k{.stride_batch = num_heads * key_len * size_per_head,
-                         .stride_seq   = size_per_head,
-                         .stride_head  = key_len * size_per_head};
-    Layout      layout_v{.stride_batch = num_heads * key_len * size_per_head,
-                         .stride_seq   = size_per_head,
-                         .stride_head  = key_len * size_per_head};
-    Layout      layout_o{.stride_batch = num_heads * seq_len * size_per_head,
-                         .stride_seq   = num_heads * size_per_head,
-                         .stride_head  = size_per_head,
-                         .use_seqlens  = true};
-    AttentionOp flash_attention(batch_size, num_heads, key_len, seq_len, size_per_head);
-    float*      accum_buf_ptr = (float*)allocator.malloc(flash_attention.get_workspace_size(), true);
+    using AttentionOp = FlashAttentionOp<scalar_t, scalar_t, scalar_t>;
+    typename AttentionOp::QueryLayout layout_q{.data_ptr     = query_ptr,
+                                               .stride_batch = num_heads * seq_len * size_per_head,
+                                               .stride_seq   = size_per_head,
+                                               .stride_head  = seq_len * size_per_head};
+    typename AttentionOp::KeyLayout   layout_k{.data_ptr     = key_ptr,
+                                               .stride_batch = num_heads * key_len * size_per_head,
+                                               .stride_seq   = size_per_head,
+                                               .stride_head  = key_len * size_per_head};
+    typename AttentionOp::ValueLayout layout_v{.data_ptr     = val_ptr,
+                                               .stride_batch = num_heads * key_len * size_per_head,
+                                               .stride_seq   = size_per_head,
+                                               .stride_head  = key_len * size_per_head};
+    typename AttentionOp::OutLayout   layout_o{.data_ptr     = actual_out_ptr,
+                                               .stride_batch = num_heads * seq_len * size_per_head,
+                                               .stride_seq   = num_heads * size_per_head,
+                                               .stride_head  = size_per_head,
+                                               .use_seqlens  = true};
+    AttentionOp                       flash_attention(batch_size, num_heads, key_len, seq_len, size_per_head);
+    float* accum_buf_ptr = (float*)allocator.malloc(flash_attention.get_workspace_size(), true);
 
-    typename AttentionOp::Params attn_params{.attn_out     = actual_out_ptr,
-                                             .query        = query_ptr,
-                                             .key          = key_ptr,
-                                             .val          = val_ptr,
-                                             .mask         = mask_ptr,
+    typename AttentionOp::Params attn_params{.mask         = mask_ptr,
                                              .out_accum    = accum_buf_ptr,
                                              .cu_seqlens_q = cu_seqlens_ptr,
                                              .cu_seqlens_k = nullptr,

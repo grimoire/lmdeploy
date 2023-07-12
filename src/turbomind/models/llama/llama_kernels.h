@@ -77,31 +77,34 @@ void invokeGatherOutput(int*         output_ids,
 
 void invokeMyCopyInt(int* dst, const int* src, size_t count, cudaStream_t st);
 
-template<typename T>
+template<typename scalar_q_t, typename scalar_k_t, typename scalar_v_t>
 class FlashAttentionOp {
 public:
+    template<typename scalar_t>
     struct AttentionLayout {
-        int  stride_batch;
-        int  stride_seq;
-        int  stride_head;
-        bool use_seqlens       = false;
-        int  batch_seqs_offset = 0;
-        T**  batch_seqs        = nullptr;
+        scalar_t*  data_ptr;
+        int        stride_batch;
+        int        stride_seq;
+        int        stride_head;
+        bool       use_seqlens       = false;
+        int        batch_seqs_offset = 0;
+        scalar_t** batch_seqs        = nullptr;
     };
 
+    using QueryLayout = AttentionLayout<scalar_q_t>;
+    using KeyLayout   = AttentionLayout<scalar_k_t>;
+    using ValueLayout = AttentionLayout<scalar_v_t>;
+    using OutLayout   = QueryLayout;
+
     struct Params {
-        T*              attn_out;
-        T*              query;
-        T*              key;
-        T*              val;
-        T*              mask;
-        float*          out_accum    = nullptr;
-        int*            cu_seqlens_q = nullptr;
-        int*            cu_seqlens_k = nullptr;
-        AttentionLayout layout_q;
-        AttentionLayout layout_k;
-        AttentionLayout layout_v;
-        AttentionLayout layout_o;
+        scalar_q_t* mask;
+        float*      out_accum    = nullptr;
+        int*        cu_seqlens_q = nullptr;
+        int*        cu_seqlens_k = nullptr;
+        QueryLayout layout_q;
+        KeyLayout   layout_k;
+        ValueLayout layout_v;
+        OutLayout   layout_o;
     };
 
 public:
