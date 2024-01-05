@@ -21,7 +21,7 @@ class LLM(object):
                  model_name: str,
                  tp: int = 1,
                  max_session_len=40000) -> None:
-        self.tokenizer = Tokenizer(model_path, trust_remote_code=True)
+        self.tokenizer = Tokenizer(model_path)
 
         self.scheduler_config = SchedulerConfig(
             max_batches=64,
@@ -48,7 +48,6 @@ class LLM(object):
         """say."""
         prompt = self.model.get_prompt(question, True)
         input_ids = self.tokenizer.encode(prompt)
-        input_ids = self.model.update_input_ids(input_ids)
         _, token_ids, __ = self.generator.infer(
             session_id=self.session_id,
             prompt_token_ids=input_ids,
@@ -136,7 +135,9 @@ def generate_prompt_landmark(n_garbage=60000, seed=666):
 def main(args):
     """main."""
     # Load model and tokenizer
-    llm = LLM(model_path=args.model_path, model_name=args.model_name)
+    llm = LLM(model_path=args.model_path,
+              model_name=args.model_name,
+              max_session_len=args.max_tokens)
 
     all_accuries = {}
     # This is a rough ratio to control the number of texts and tokens
@@ -151,7 +152,6 @@ def main(args):
                                                           seed=(val + j))
             response = llm.say(question)
 
-            print(response)
             if pass_key in response:
                 passed_tests += 1
             total_tokens += len(llm.tokenize(question=question))
