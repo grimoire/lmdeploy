@@ -113,7 +113,9 @@ def generate_prompt_landmark(n_garbage=60000, seed=666):
 
     task_description = 'There is an important info hidden inside a lot of irrelevant text. Find it and memorize them. I will quiz you about the important information there.'  # noqa: E501
     garbage = 'The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again.'  # noqa: E501
-    garbage_inf = ' '.join([garbage] * 5000)
+    garbage_repeat = n_garbage // (len(garbage) + 1)
+    garbage_inf = ' '.join([garbage] * garbage_repeat)
+    # garbage_inf = ' '.join([garbage] * 5000)
     assert len(garbage_inf) >= n_garbage
     garbage_prefix = garbage_inf[:n_garbage_prefix]
     garbage_suffix = garbage_inf[:n_garbage_suffix]
@@ -158,6 +160,8 @@ def main(args):
         avg_tokens = total_tokens // args.num_tests
         accuracy = passed_tests / args.num_tests
         print('accuracy on the token length %d is %f' % (avg_tokens, accuracy))
+        import torch
+        print(torch.cuda.memory_summary())
         all_accuries[str(avg_tokens)] = accuracy
 
     print('accuries over tokens', all_accuries)

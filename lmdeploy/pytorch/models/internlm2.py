@@ -162,6 +162,12 @@ class PatchedInternLM2MLP(nn.Module):
 
 class PatchedInternLM2Model(nn.Module):
 
+    def _update_model_fn(self):
+        """update model."""
+        rotary_emb = self.layers[0].attention.rotary_emb
+        for layer in self.layers[1:]:
+            layer.attention.rotary_emb = rotary_emb
+
     def _continuous_batching_forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -198,6 +204,13 @@ class PatchedInternLM2Model(nn.Module):
             hidden_states = layer_outputs[0]
 
         hidden_states = self.norm(hidden_states)
+
+        context = self.context.context
+        q_start_loc = context.q_start_loc
+        seq_length = context.seq_length
+        if hidden_states.size(1) != len(seq_length):
+            last_loc = q_start_loc + seq_length - 1
+            hidden_states = hidden_states[:, last_loc]
 
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,

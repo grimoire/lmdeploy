@@ -477,7 +477,7 @@ class Engine:
         logits = logits.cuda()
         grouped_params = _group_params(running)
 
-        is_decoding = inputs.is_decoding
+        is_decoding = len(logits) == len(inputs.seq_length)
         # TODO: support repetition_penalty
         if not is_decoding:
             seq_length = inputs.seq_length
