@@ -68,7 +68,7 @@ class RequestSender:
     def _resp_que_get(self, block: bool = True, timeout: float = None):
         """warp of resp_que.get."""
         if not block:
-            return self.resp_que(block=block, timeout=timeout)
+            return self.resp_que.get(block=block, timeout=timeout)
         timeout_counter = timeout or float(1 << 30)
         while timeout_counter > self.THREAD_ALIVE_INTERVAL:
             try:
@@ -86,7 +86,7 @@ class RequestSender:
                                   timeout: float = None):
         """warp of resp_que.get."""
         if not block:
-            return self.resp_que(block=block, timeout=timeout)
+            return self.resp_que.get(block=block, timeout=timeout)
         timeout_counter = timeout or float(1 << 30)
         while timeout_counter > self.THREAD_ALIVE_INTERVAL:
             if self.resp_que.qsize() == 0:
@@ -116,11 +116,11 @@ class RequestSender:
             self.resp_dict.pop(req_id)
         return ret
 
-    def _prefetch_resps(self):
+    def _prefetch_resps(self, block=True):
         """prefetch from resp que."""
         num_resps = self.resp_que.qsize()
         for _ in range(num_resps):
-            resp: Response = self._resp_que_get()
+            resp: Response = self._resp_que_get(block=block)
             req_id = resp.req_id
             self._push_resp(req_id, resp)
 
@@ -168,9 +168,9 @@ class RequestSender:
         # check resp que
         return self._resp_que_get(timeout=que_timeout)
 
-    def recv_all(self, req_id: int):
+    def recv_all(self, req_id: int, block: bool = True):
         """revceive all response with req_id."""
-        self._prefetch_resps()
+        self._prefetch_resps(block)
         resps = self.resp_dict.pop(req_id, [])
         return resps
 
@@ -193,6 +193,7 @@ class RequestSender:
                          req_id: int,
                          que_timeout: float = None) -> Response:
         """receive response of given request id async."""
+        self._prefetch_resps(block=False)
         ret = self._pop_resp(req_id, default=None)
         if ret is not None:
             return ret
@@ -268,7 +269,7 @@ class RequestManager:
         tmp = num_reqs
         while tmp:
             tmp -= 1
-            elem = self.requests.get()
+            elem = self.requests.get(block=False)
             if isinstance(elem, Request):
                 elem = [elem]
             reqs += elem

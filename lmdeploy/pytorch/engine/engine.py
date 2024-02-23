@@ -643,6 +643,9 @@ class Engine:
         if len(running) == 0:
             return dict()
 
+        log_mode = 'prefilling' if is_prefill else 'decoding'
+        logger.debug(f'{log_mode} batch size: {len(running)}')
+
         inputs = self.create_model_inputs(running, adapters)
 
         # inference
@@ -908,6 +911,7 @@ class EngineInstance:
             List[int]: The streaming output tokens.
             int: The number of the output tokens.
         """
+        import asyncio
         gen_config = gen_config or EngineGenerationConfig()
         request_output_len = gen_config.max_new_tokens
         sampling_param = SamplingParam.from_gen_config(gen_config=gen_config)
@@ -926,19 +930,24 @@ class EngineInstance:
             if not self.engine.loop_threads.is_alive():
                 yield (ResponseType.ENGINE_STOP_ERROR, [], 0)
                 break
-            resp = await self.req_sender.async_recv(req_id)
-            # avoid token decoding and scheduling simultaneously
-            if resp.req_id != req_id:
+
+            resps = self.req_sender.recv_all(req_id, block=False)
+            if len(resps) == 0:
+                await asyncio.sleep(0.02)
                 continue
-            if resp.type == ResponseType.SUCCESS:
-                token_ids += resp.data['token_ids']
-                yield (resp.type, token_ids, len(token_ids))
-            elif resp.type == ResponseType.FINISH:
-                token_ids += resp.data['token_ids']
-                yield (resp.type, token_ids, len(token_ids))
-                break
-            else:
-                yield (resp.type, [], 0)
+            resp_type = ResponseType.SUCCESS
+            for resp in resps:
+                resp_type = resp.type
+                if resp.type == ResponseType.SUCCESS:
+                    token_ids += resp.data['token_ids']
+                elif resp.type == ResponseType.FINISH:
+                    token_ids += resp.data['token_ids']
+                    break
+                else:
+                    token_ids = []
+                    break
+            yield (resp_type, token_ids, len(token_ids))
+            if resp_type != ResponseType.SUCCESS:
                 break
 
     def stream_infer(self,
