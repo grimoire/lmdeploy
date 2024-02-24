@@ -32,9 +32,8 @@ class SamplingParam:
 
     def __hash__(self):
         """hash."""
-        return hash(
-            (self.top_k, self.top_p, self.temperature, self.repetition_penalty,
-             self.ignore_eos, self.random_seed))
+        return hash((self.top_k, self.top_p, self.temperature,
+                     self.repetition_penalty, self.ignore_eos))
 
     @classmethod
     def from_gen_config(self, gen_config: EngineGenerationConfig):

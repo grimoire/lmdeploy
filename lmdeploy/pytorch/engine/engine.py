@@ -1,4 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import asyncio
 import os
 import time
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from ..messages import (MessageStatus, SamplingParam, SchedulerSequence,
 from ..paging import Scheduler
 from .logits_process import FusedLogitsProcessor
 from .model_agent import AutoModelAgent, ModelInputs
-from .request import Request, RequestManager, RequestType, Response
+from .requests import Request, RequestType, Response, build_request_manager
 
 logger = get_logger('lmdeploy')
 
@@ -149,11 +150,13 @@ class Engine:
         self.cache_config = cache_config
         self.stream = torch.cuda.Stream()
 
-        self.req_manager = self._bind_request_manager()
+        self.request_manager_type = 'coro'
+        self.req_manager = self._bind_request_manager(
+            self.request_manager_type)
 
         # create main thread
-        self.loop_threads = self._start_loop()
-        self.req_sender = self.req_manager.build_sender(self.loop_threads)
+        self._start_loop()
+        self.req_sender = self.req_manager.build_sender()
 
         self._create_buffers()
         self.tokenizer = Tokenizer(model_path)
@@ -196,9 +199,9 @@ class Engine:
         self._attention_mask_buf = torch.ones(max_batches, 1, dtype=torch.long)
         self._seq_length_buf = torch.ones(max_batches, dtype=torch.long)
 
-    def _bind_request_manager(self):
+    def _bind_request_manager(self, request_manager_type: str):
         """bind request manager."""
-        req_manager = RequestManager()
+        req_manager = build_request_manager(request_manager_type)
         req_manager.bind_func(RequestType.ADD_SESSION, self._on_add_session)
         req_manager.bind_func(RequestType.STOP_SESSION, self._on_stop_session)
         req_manager.bind_func(RequestType.END_SESSION, self._on_end_session)
@@ -207,9 +210,11 @@ class Engine:
 
     def _start_loop(self):
         """start loop."""
-        loop_threads = Thread(target=self.loop, daemon=True)
-        loop_threads.start()
-        return loop_threads
+        if self.request_manager_type == 'coro':
+            loop = self.async_loop
+        else:
+            loop = self.loop
+        self.req_manager.start_loop(loop)
 
     def _on_add_session(self, reqs: Request, **kwargs):
         """on add session callback."""
@@ -479,12 +484,17 @@ class Engine:
             ]
             grouped_params = dict()
             for i, key in enumerate(sampling_params):
-                grouped_params.setdefault(key, list())
-                grouped_params[key].append(i)
+                key_hash = hash(key)
+                grouped_params.setdefault(key_hash, (key, list()))
+                grouped_params[key_hash][1].append(i)
+            grouped_params = dict(grouped_params.values())
             return grouped_params
 
         def _sampling(grouped_params, split_logits, inputs):
             next_token_ids = torch.empty((len(running), ), dtype=torch.long)
+            if len(grouped_params) > 4:
+                for param, idx in grouped_params.items():
+                    print(param)
             for param, idx in grouped_params.items():
                 logits_processor = FusedLogitsProcessor(param)
                 input_ids = inputs.input_ids.reshape(-1, 1)
@@ -642,35 +652,133 @@ class Engine:
         else:
             return __long_context_forward(inputs)
 
-    def step(self, is_prefill: bool, return_logits: bool = False):
-        """one step inference. Used to perform streaming chat.
+    async def _async_model_forward(self, inputs: ModelInputs,
+                                   swap_in_map: Dict, swap_out_map: Dict):
+        """model forward."""
+        max_prefill_token_num = self.scheduler_config.max_prefill_token_num
+        swap_done = False
 
-        Args:
-            return_logits (bool): Whether to return the output logits.
+        class _LogitsGather:
+            """logits gather."""
 
-        Returns:
-            Dict[int, InferOutput]: The output of each session.
-        """
+            def __init__(self, max_seq_len):
+                self._max_seq_len = max_seq_len
+                self._start = 0
+                self._out_logits = None
 
+            def gather(self, output):
+                """gather."""
+                logits = output['logits']
+                out_logits = self._out_logits
+                start = self._start
+                seq_len = logits.size(-2)
+                if out_logits is None:
+                    out_logits = logits.new_empty(1,
+                                                  self._max_seq_len,
+                                                  logits.size(-1),
+                                                  device='cpu')
+                out_logits[:, start:start + seq_len].copy_(logits,
+                                                           non_blocking=True)
+                self._start = start + seq_len
+                self._out_logits = out_logits
+
+            def get_logits(self):
+                """get logits."""
+                torch.cuda.synchronize()
+                return self._out_logits
+
+        async def __forward(inputs):
+            """forward."""
+            nonlocal swap_done, swap_in_map, swap_out_map
+            if swap_done:
+                return await self.model_agent.async_forward(
+                    inputs, swap_in_map=dict(), swap_out_map=dict())
+            else:
+                swap_done = True
+                return await self.model_agent.async_forward(
+                    inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+
+        async def __long_context_single_forward(inputs, index):
+            """one large sequence."""
+            new_input = inputs.slice(index, index + 1)
+            max_seq_len = new_input.seq_length[0]
+            new_inputs = new_input.split(max_prefill_token_num,
+                                         self.cache_config.block_size)
+
+            logits_gather = _LogitsGather(max_seq_len)
+            for inp in new_inputs:
+                tmp_out = await __forward(inp)
+                logits_gather.gather(tmp_out)
+            tmp_out['logits'] = logits_gather.get_logits()
+            return tmp_out
+
+        async def __long_context_batched_forward(inputs, start, end):
+            """batched."""
+            new_inputs = inputs.slice(start, end)
+            return await __forward(new_inputs)
+
+        async def __long_context_forward(inputs):
+            """forward for long context."""
+            seq_len = inputs.seq_length
+            max_seq_len = inputs.input_ids.size(1)
+            batch_size = seq_len.size(0)
+
+            indices = []
+            token_count = 0
+            idx = 0
+            logits_gather = _LogitsGather(max_seq_len)
+            while idx < batch_size:
+                slen = seq_len[idx]
+                if token_count == 0 and slen > max_prefill_token_num:
+                    tmp_out = await __long_context_single_forward(inputs, idx)
+                    logits_gather.gather(tmp_out)
+                    idx += 1
+                elif token_count + slen > max_prefill_token_num:
+                    tmp_out = await __long_context_batched_forward(
+                        inputs, indices[0], idx)
+                    logits_gather.gather(tmp_out)
+                    indices = []
+                    token_count = 0
+                else:
+                    indices.append(idx)
+                    token_count += slen
+                    idx += 1
+
+            if token_count > 0:
+                tmp_out = await __long_context_batched_forward(
+                    inputs, indices[0], idx)
+                logits_gather.gather(tmp_out)
+            tmp_out['logits'] = logits_gather.get_logits()
+            return tmp_out
+
+        if inputs.input_ids.numel() < max_prefill_token_num:
+            return await __forward(inputs)
+        else:
+            return await __long_context_forward(inputs)
+
+    def _step_pre_forward(self, is_prefill: bool):
+        """steps before forward."""
         # schedule
         schedule_output = self.scheduler.schedule(is_prefill=is_prefill)
 
         running: SeqList = schedule_output.running
-        swap_in_map = schedule_output.swap_in_map
-        swap_out_map = schedule_output.swap_out_map
         adapters = schedule_output.adapters
+
         if len(running) == 0:
-            return dict()
+            return schedule_output, None
 
         log_mode = 'prefilling' if is_prefill else 'decoding'
         logger.debug(f'{log_mode} batch size: {len(running)}')
 
         inputs = self.create_model_inputs(running, adapters)
+        return schedule_output, inputs
 
-        # inference
-        output = self._model_forward(inputs,
-                                     swap_in_map=swap_in_map,
-                                     swap_out_map=swap_out_map)
+    def _step_post_forward(self,
+                           running: SeqList,
+                           inputs: ModelInputs,
+                           output: Dict,
+                           return_logits: bool = False):
+        """steps after forward."""
         custom_outputs = output['custom_outputs']
         logits = output['logits']
         logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
@@ -702,6 +810,67 @@ class Engine:
             for msg, msg_logit in zip(running, split_logits):
                 outputs[msg.session_id].logits = msg_logit
         return outputs
+
+    def step(self, is_prefill: bool, return_logits: bool = False):
+        """one step inference. Used to perform streaming chat.
+
+        Args:
+            return_logits (bool): Whether to return the output logits.
+
+        Returns:
+            Dict[int, InferOutput]: The output of each session.
+        """
+
+        # schedule
+        schedule_output, inputs = self._step_pre_forward(is_prefill=is_prefill)
+
+        running: SeqList = schedule_output.running
+        swap_in_map = schedule_output.swap_in_map
+        swap_out_map = schedule_output.swap_out_map
+
+        if len(running) == 0:
+            return dict()
+
+        # inference
+        output = self._model_forward(inputs,
+                                     swap_in_map=swap_in_map,
+                                     swap_out_map=swap_out_map)
+
+        return self._step_post_forward(running,
+                                       inputs,
+                                       output,
+                                       return_logits=return_logits)
+
+    async def async_step(self, is_prefill: bool, return_logits: bool = False):
+        """one step inference. Used to perform streaming chat.
+
+        Args:
+            return_logits (bool): Whether to return the output logits.
+
+        Returns:
+            Dict[int, InferOutput]: The output of each session.
+        """
+
+        # schedule
+        schedule_output, inputs = self._step_pre_forward(is_prefill=is_prefill)
+
+        running: SeqList = schedule_output.running
+        swap_in_map = schedule_output.swap_in_map
+        swap_out_map = schedule_output.swap_out_map
+
+        if len(running) == 0:
+            return dict()
+
+        # inference
+        output = await self._async_model_forward(inputs,
+                                                 swap_in_map=swap_in_map,
+                                                 swap_out_map=swap_out_map)
+
+        ret = self._step_post_forward(running,
+                                      inputs,
+                                      output,
+                                      return_logits=return_logits)
+        return ret
 
     def batched_infer(self,
                       session_ids: List[int],
@@ -760,7 +929,7 @@ class Engine:
         status = 0
         finish_count = batch_size
         while finish_count:
-            if not self.loop_threads.is_alive():
+            if not self.req_manager.is_loop_alive():
                 logger.error('Engine loop is not alive.')
                 status = 1
                 break
@@ -881,6 +1050,53 @@ class Engine:
                 # send response
                 send_resp_que.put(step_tokens)
 
+    async def async_loop(self):
+        """Main loop of the engine.
+
+        Each engine instance would communicate with the engine by queue.
+        """
+
+        def _send_resp(step_tokens):
+            """send response callback."""
+            for _, out in step_tokens.items():
+                if out.finish:
+                    resp_type = ResponseType.FINISH
+                else:
+                    resp_type = ResponseType.SUCCESS
+                self.req_manager.response(
+                    Response(
+                        type=resp_type,
+                        sender_id=out.sender_id,
+                        req_id=out.req_id,
+                        data=dict(token_ids=out.token_ids),
+                    ))
+
+        prefill_interval = self.scheduler_config.prefill_interval
+        prefill_counter = prefill_interval
+
+        while True:
+            if not self.req_manager.has_requests(
+            ) and not self.scheduler.has_unfinished():
+                await asyncio.sleep(0.01)
+                continue
+
+            self.req_manager.step()
+
+            # forward
+            if self.scheduler.has_unfinished():
+                has_running = self.scheduler.has_running()
+                is_prefill = not prefill_counter or not has_running
+                if is_prefill:
+                    prefill_counter = prefill_interval
+                with torch.inference_mode():
+                    step_tokens: Dict[int,
+                                      InferOutput] = await self.async_step(
+                                          is_prefill=is_prefill)
+                prefill_counter -= 1
+
+                # send response
+                _send_resp(step_tokens)
+
 
 class EngineInstance:
     """Instance of TurboMind.
@@ -891,7 +1107,7 @@ class EngineInstance:
 
     def __init__(self, engine: Engine):
         self.engine = engine
-        self.req_sender = engine.req_manager.build_sender(engine.loop_threads)
+        self.req_sender = engine.req_manager.build_sender()
 
     def __del__(self):
         """Destructor."""
@@ -905,6 +1121,18 @@ class EngineInstance:
         """
         resp = self.req_sender.send(RequestType.ADD_SESSION,
                                     dict(session_id=session_id))
+        _check_resp(resp, [ResponseType.SUCCESS, ResponseType.SESSION_REPEAT],
+                    (f'Can not add session {session_id} '
+                     f'with error: {resp.type}'))
+
+    async def _async_try_add_session(self, session_id: int):
+        """Add new session.
+
+        Args:
+            session_id (int): The session id to add.
+        """
+        resp = await self.req_sender.async_send(RequestType.ADD_SESSION,
+                                                dict(session_id=session_id))
         _check_resp(resp, [ResponseType.SUCCESS, ResponseType.SESSION_REPEAT],
                     (f'Can not add session {session_id} '
                      f'with error: {resp.type}'))
@@ -928,11 +1156,10 @@ class EngineInstance:
             List[int]: The streaming output tokens.
             int: The number of the output tokens.
         """
-        import asyncio
         gen_config = gen_config or EngineGenerationConfig()
         request_output_len = gen_config.max_new_tokens
         sampling_param = SamplingParam.from_gen_config(gen_config=gen_config)
-        self._try_add_session(session_id)
+        await self._async_try_add_session(session_id)
         msg = dict(
             token_ids=input_ids,
             session_id=session_id,
@@ -940,18 +1167,21 @@ class EngineInstance:
             sampling_param=sampling_param,
             adapter_name=adapter_name,
         )
-        req_id = self.req_sender.send_async(RequestType.ADD_MESSAGE, msg)
+        req_id = await self.req_sender.async_send_async(
+            RequestType.ADD_MESSAGE, msg)
 
         token_ids = []
         while True:
-            if not self.engine.loop_threads.is_alive():
+            if not self.req_sender.is_loop_alive():
                 yield (ResponseType.ENGINE_STOP_ERROR, [], 0)
                 break
 
             resps = self.req_sender.recv_all(req_id, block=False)
             if len(resps) == 0:
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.1)
                 continue
+                # resp = await self.req_sender.async_recv(req_id)
+                # resps = [resp]
             resp_type = ResponseType.SUCCESS
             for resp in resps:
                 resp_type = resp.type
@@ -1003,7 +1233,7 @@ class EngineInstance:
 
         token_ids = []
         while True:
-            if not self.engine.loop_threads.is_alive():
+            if not self.req_sender.is_loop_alive():
                 yield (ResponseType.ENGINE_STOP_ERROR, [], 0)
                 break
             resp = self.req_sender.recv(req_id)
@@ -1050,11 +1280,25 @@ class EngineInstance:
 
         return (0, token_ids, len(token_ids))
 
+    async def async_end(self, session_id: int):
+        """End the given session."""
+        resp = await self.req_sender.async_send(RequestType.END_SESSION,
+                                                dict(session_id=session_id))
+        _check_resp_success(resp, (f'Failed to end session: {session_id}. '
+                                   f'Error: {resp.type}.'))
+
     def end(self, session_id: int):
         """End the given session."""
         resp = self.req_sender.send(RequestType.END_SESSION,
                                     dict(session_id=session_id))
         _check_resp_success(resp, (f'Failed to end session: {session_id}. '
+                                   f'Error: {resp.type}.'))
+
+    async def async_cancel(self, session_id: int):
+        """Stop current streaming inference."""
+        resp = await self.req_sender.async_send(RequestType.STOP_SESSION,
+                                                dict(session_id=session_id))
+        _check_resp_success(resp, (f'Failed to cancel session: {session_id}. '
                                    f'Error: {resp.type}.'))
 
     def cancel(self, session_id: int):
