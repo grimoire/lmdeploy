@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+import numpy as np
 import torch
 
 from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
@@ -438,11 +439,11 @@ class Engine:
             token_ids = [token_ids]
 
         batch_size = len(messages)
-        input_ids = torch.cat(token_ids)
+        input_ids = torch.from_numpy(np.concatenate(token_ids))
 
         is_decoding = input_ids.size(0) == batch_size
         if not is_decoding:
-            seq_length = [tokens.size(0) for tokens in token_ids]
+            seq_length = [len(tokens) for tokens in token_ids]
             seq_length = torch.tensor(seq_length, dtype=torch.long)
             max_seq_len = max(seq_length)
             q_start_loc = seq_length.cumsum(0) - seq_length
@@ -540,7 +541,7 @@ class Engine:
                                 dtype=torch.int64)
             for idx, seq in enumerate(seqs):
                 h_len = seq.history_len
-                h_ids = seq.history_token_ids
+                h_ids = torch.from_numpy(seq.history_token_ids)
                 output[idx, :h_len] = h_ids
             return output.to(device)
 
@@ -575,10 +576,11 @@ class Engine:
         """update scheduler."""
         for token, msg in zip(next_token_ids, running):
             msg.meta = meta
-            msg.update_token_ids(token)
             msg.num_new_tokens += 1
+            update_token = token
             if msg.num_new_tokens > msg.sampling_param.max_new_tokens:
-                msg.token_ids = torch.empty((0, ), dtype=torch.long)
+                update_token = np.empty((0, ), dtype=np.int64)
+            msg.update_token_ids(update_token)
             if self._stopping_criteria(msg, token):
                 msg.status = MessageStatus.STOPPED
 

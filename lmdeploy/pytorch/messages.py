@@ -5,7 +5,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-import torch
+import numpy as np
 from torch import Tensor
 
 from lmdeploy.messages import EngineGenerationConfig
@@ -129,9 +129,11 @@ class SchedulerSession:
                      adapter_name: str = None,
                      return_logits: bool = False) -> 'SchedulerSequence':
         """Add a new message."""
-        if not isinstance(token_ids, Tensor):
-            token_ids = torch.tensor(token_ids)
-        if token_ids.dim() == 0:
+        if isinstance(token_ids, Tensor):
+            token_ids = token_ids.numpy()
+        elif not isinstance(token_ids, np.ndarray):
+            token_ids = np.array(token_ids)
+        if token_ids.ndim == 0:
             token_ids = token_ids.unsqueeze(0)
         if sampling_param is None:
             sampling_param = SamplingParam()
@@ -190,27 +192,23 @@ class HistoryTokenIds:
     """history token ids."""
     ALLOC_SIZE = 1024
 
-    def __init__(self, token_ids: Tensor = None):
+    def __init__(self, token_ids: np.ndarray = None):
         if token_ids is None:
-            self._token_ids = torch.empty((self.ALLOC_SIZE), dtype=torch.int64)
+            self._token_ids = np.empty((self.ALLOC_SIZE, ), dtype=np.int64)
             self._num_real = 0
         else:
             self._token_ids = token_ids
             self._num_real = len(token_ids)
 
-    @torch.inference_mode()
     def reserve(self, size: int):
         """reserve cache."""
         num_tokens = len(self._token_ids)
         if num_tokens >= size:
             return
         reserve_size = _round_up(size - num_tokens, self.ALLOC_SIZE)
-        new_token_ids = torch.empty((num_tokens + reserve_size),
-                                    dtype=torch.int64)
-        new_token_ids[:num_tokens] = self._token_ids
+        new_token_ids = np.pad(self._token_ids, (0, reserve_size))
         self._token_ids = new_token_ids
 
-    @torch.inference_mode()
     def get_real(self):
         """get logical blocks."""
         return self._token_ids[:self._num_real]
@@ -223,8 +221,7 @@ class HistoryTokenIds:
         """get values."""
         return self.get_real().__getitem__(*args, **kwargs)
 
-    @torch.inference_mode()
-    def append(self, token_ids: Tensor):
+    def append(self, token_ids: np.ndarray):
         """append token ids."""
         num_tokens = len(token_ids)
         self.reserve(num_tokens + self._num_real)
@@ -237,7 +234,6 @@ class HistoryTokenIds:
         """get length."""
         return self._num_real
 
-    @torch.inference_mode()
     def clone(self):
         """clone."""
         ret = HistoryTokenIds()
@@ -304,20 +300,20 @@ class SchedulerSequence:
         """num all tokens."""
         return self.history_len + self._tokens_len
 
-    @torch.inference_mode()
     def update_token_ids(self, token_ids: Tensor):
         """Update token ids, old token ids will be added to history."""
         self._history_len += self._tokens_len
-        if not isinstance(token_ids, Tensor):
-            token_ids = torch.tensor(token_ids)
-        if token_ids.dim() == 0:
+        if isinstance(token_ids, Tensor):
+            token_ids = token_ids.numpy()
+        elif not isinstance(token_ids, np.ndarray):
+            token_ids = np.array(token_ids)
+        if token_ids.ndim == 0:
             token_ids = token_ids[None]
         self._tokens_len = len(token_ids)
-        self.history_cache.append(token_ids.detach().cpu())
+        self.history_cache.append(token_ids)
         self.random_offsets += 1
         self.arrive_time = time.time()
 
-    @torch.inference_mode()
     def set_step(self, step: int):
         """set step."""
         redo_size = self.history_len - step
