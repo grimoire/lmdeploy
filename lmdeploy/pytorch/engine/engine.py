@@ -540,7 +540,7 @@ class Engine:
                                 dtype=torch.int64)
             for idx, seq in enumerate(seqs):
                 h_len = seq.history_len
-                h_ids = output.new_tensor(seq.history_token_ids)
+                h_ids = seq.history_token_ids
                 output[idx, :h_len] = h_ids
             return output.to(device)
 

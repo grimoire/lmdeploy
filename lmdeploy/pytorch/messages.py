@@ -137,9 +137,8 @@ class SchedulerSession:
             sampling_param = SamplingParam()
 
         seq = SchedulerSequence(seq_id=_new_msg_id(),
-                                token_ids=token_ids,
                                 session=self,
-                                block_size=self.block_size,
+                                history_cache=HistoryTokenIds(token_ids),
                                 status=MessageStatus.WAITING,
                                 num_new_tokens=0,
                                 sampling_param=sampling_param,
@@ -151,46 +150,111 @@ class SchedulerSession:
 
     def fork_sequence(
             self,
-            token_ids: Tensor,
             seq: 'SchedulerSequence',
             sampling_param: SamplingParam = None) -> 'SchedulerSequence':
         """Fork a new message from exist message."""
         if sampling_param is None:
             sampling_param = deepcopy(seq.sampling_param)
-        if not isinstance(token_ids, Tensor):
-            token_ids = torch.tensor(token_ids)
-        if token_ids.dim() == 0:
-            token_ids = token_ids.unsqueeze(0)
         assert seq.session == self
 
-        new_msg = SchedulerSequence(
-            seq_id=_new_msg_id(),
-            token_ids=token_ids,
-            session=self,
-            block_size=self.block_size,
-            history_token_ids=seq.history_token_ids.copy(),
-            num_new_tokens=0,
-            sampling_param=sampling_param,
-            status=seq.status,
-            logical_blocks=seq.logical_blocks.clone(),
-            adapter_name=seq.adapter_name,
-            arrive_time=time.time(),
-            meta=deepcopy(seq.meta),
-            return_logits=seq.return_logits,
-            random_offsets=seq.random_offsets + 1)
+        new_msg = SchedulerSequence(seq_id=_new_msg_id(),
+                                    session=self,
+                                    history_cache=seq.history_cache.clone(),
+                                    num_new_tokens=0,
+                                    sampling_param=sampling_param,
+                                    status=seq.status,
+                                    logical_blocks=seq.logical_blocks.clone(),
+                                    adapter_name=seq.adapter_name,
+                                    arrive_time=time.time(),
+                                    meta=deepcopy(seq.meta),
+                                    return_logits=seq.return_logits,
+                                    random_offsets=seq.random_offsets + 1)
+        new_msg._history_len = seq._history_len
+        new_msg._tokens_len = seq._tokens_len
 
         self.sequences[new_msg.seq_id] = new_msg
         return new_msg
+
+
+def _div_up(x, n):
+    """perform div up."""
+    return (x + n - 1) // n
+
+
+def _round_up(x, n):
+    """perform round up."""
+    return _div_up(x, n) * n
+
+
+class HistoryTokenIds:
+    """history token ids."""
+    ALLOC_SIZE = 1024
+
+    def __init__(self, token_ids: Tensor = None):
+        if token_ids is None:
+            self._token_ids = torch.empty((self.ALLOC_SIZE), dtype=torch.int64)
+            self._num_real = 0
+        else:
+            self._token_ids = token_ids
+            self._num_real = len(token_ids)
+
+    @torch.inference_mode()
+    def reserve(self, size: int):
+        """reserve cache."""
+        num_tokens = len(self._token_ids)
+        if num_tokens >= size:
+            return
+        reserve_size = _round_up(size - num_tokens, self.ALLOC_SIZE)
+        new_token_ids = torch.empty((num_tokens + reserve_size),
+                                    dtype=torch.int64)
+        new_token_ids[:num_tokens] = self._token_ids
+        self._token_ids = new_token_ids
+
+    @torch.inference_mode()
+    def get_real(self):
+        """get logical blocks."""
+        return self._token_ids[:self._num_real]
+
+    def __setitem__(self, *args, **kwargs):
+        """set values."""
+        return self.get_real().__setitem__(*args, **kwargs)
+
+    def __getitem__(self, *args, **kwargs):
+        """get values."""
+        return self.get_real().__getitem__(*args, **kwargs)
+
+    @torch.inference_mode()
+    def append(self, token_ids: Tensor):
+        """append token ids."""
+        num_tokens = len(token_ids)
+        self.reserve(num_tokens + self._num_real)
+        slice_start = self._num_real
+        slice_end = slice_start + num_tokens
+        self._num_real += num_tokens
+        self.__setitem__(slice(slice_start, slice_end), token_ids)
+
+    def __len__(self):
+        """get length."""
+        return self._num_real
+
+    @torch.inference_mode()
+    def clone(self):
+        """clone."""
+        ret = HistoryTokenIds()
+        ret.append(self[...])
+        return ret
+
+    def copy(self):
+        """copy."""
+        return self.clone()
 
 
 @dataclass
 class SchedulerSequence:
     """Scheduler message."""
     seq_id: int
-    token_ids: Tensor
     session: SchedulerSession
-    block_size: int
-    history_token_ids: list = field(default_factory=list)
+    history_cache: HistoryTokenIds = field(default_factory=HistoryTokenIds)
     num_new_tokens: int = 0
     sampling_param: SamplingParam = field(default_factory=SamplingParam)
     status: MessageStatus = MessageStatus.WAITING
@@ -204,38 +268,59 @@ class SchedulerSequence:
     return_logits: bool = False
     random_offsets: int = 0
 
+    def __post_init__(self):
+        """post init."""
+        self._history_len: int = 0
+        self._tokens_len: int = len(self.history_cache)
+
+    @property
+    def block_size(self) -> int:
+        """block size."""
+        return self.session.block_size
+
     @property
     def history_len(self) -> int:
         """get history length."""
-        return len(self.history_token_ids)
+        return self._history_len
 
     @property
     def session_id(self) -> int:
         """get session id."""
         return self.session.session_id
 
+    @property
+    def token_ids(self) -> int:
+        """token ids."""
+        start = self.history_len
+        end = start + self._tokens_len
+        return self.history_cache[start:end]
+
+    @property
+    def history_token_ids(self) -> int:
+        """history ids."""
+        return self.history_cache[:self.history_len]
+
     def num_all_tokens(self) -> int:
         """num all tokens."""
-        return len(self.token_ids) + self.history_len
+        return self.history_len + self._tokens_len
 
-    def update_token_ids(self, token_ids: Tensor, update_history: bool = True):
+    @torch.inference_mode()
+    def update_token_ids(self, token_ids: Tensor):
         """Update token ids, old token ids will be added to history."""
-        if update_history:
-            self.history_token_ids += self.token_ids.tolist()
+        self._history_len += self._tokens_len
         if not isinstance(token_ids, Tensor):
-            token_ids = self.token_ids.new_tensor(token_ids)
+            token_ids = torch.tensor(token_ids)
         if token_ids.dim() == 0:
-            token_ids = token_ids.unsqueeze(0)
-        self.token_ids = token_ids
+            token_ids = token_ids[None]
+        self._tokens_len = len(token_ids)
+        self.history_cache.append(token_ids.detach().cpu())
         self.random_offsets += 1
         self.arrive_time = time.time()
 
+    @torch.inference_mode()
     def set_step(self, step: int):
         """set step."""
-        assert step <= self.history_len
-        history_token_ids = torch.tensor(self.history_token_ids,
-                                         dtype=torch.long)
-        new_history_ids = self.history_token_ids[:step]
-        new_token_ids = torch.cat([history_token_ids[step:], self.token_ids])
-        self.history_token_ids = new_history_ids
-        self.token_ids = new_token_ids
+        redo_size = self.history_len - step
+        assert redo_size >= 0
+        self._history_len -= redo_size
+        self._tokens_len += redo_size
