@@ -9,8 +9,8 @@ from lmdeploy.utils import get_logger
 from ..adapter.adapter import ADAPTER_MANAGER, SchedulerAdapter
 from ..config import CacheConfig, SchedulerConfig
 from ..messages import MessageStatus, SchedulerSequence, SchedulerSession
-from .block_manager import DefaultBlockManager as BlockManager
-from .block_manager import build_block_manager
+from .back_block_manager import DefaultBlockManager as BlockManager
+from .back_block_manager import build_block_manager
 
 logger = get_logger('lmdeploy')
 

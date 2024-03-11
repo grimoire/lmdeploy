@@ -4,13 +4,12 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
-import numpy as np
 import torch
 
 from lmdeploy.messages import (EngineGenerationConfig, PytorchEngineConfig,
                                ResponseType)
 from lmdeploy.tokenizer import Tokenizer
-from lmdeploy.utils import get_logger, get_model
+from lmdeploy.utils import get_logger, get_model, logging_timer
 
 from ..adapter.adapter import ADAPTER_MANAGER, SchedulerAdapter
 from ..check_env import check_env, check_model
@@ -405,6 +404,7 @@ class Engine:
         """Add new session."""
         return end(self.req_sender, session_id)
 
+    @logging_timer('CreateModelInputs', logger)
     @torch.inference_mode()
     def create_model_inputs(self, messages: SeqList, adapters: AdapterList):
         """create model inputs from messages.
@@ -439,11 +439,11 @@ class Engine:
             token_ids = [token_ids]
 
         batch_size = len(messages)
-        input_ids = torch.from_numpy(np.concatenate(token_ids))
+        input_ids = torch.cat(token_ids)
 
         is_decoding = input_ids.size(0) == batch_size
         if not is_decoding:
-            seq_length = [len(tokens) for tokens in token_ids]
+            seq_length = [tokens.size(0) for tokens in token_ids]
             seq_length = torch.tensor(seq_length, dtype=torch.long)
             max_seq_len = max(seq_length)
             q_start_loc = seq_length.cumsum(0) - seq_length
@@ -507,6 +507,8 @@ class Engine:
         """
 
         def _check_stop_word(sampling_param, next_token_id):
+            if sampling_param.ignore_eos:
+                return False
             return (sampling_param.stop_words is not None
                     and next_token_id in sampling_param.stop_words)
 
@@ -528,6 +530,7 @@ class Engine:
             return True
         return False
 
+    @logging_timer('SamplingLogits', logger)
     async def async_sampling_logits(self, logits: torch.Tensor,
                                     running: SeqList, inputs: ModelInputs):
         """sampling logits."""
@@ -541,7 +544,7 @@ class Engine:
                                 dtype=torch.int64)
             for idx, seq in enumerate(seqs):
                 h_len = seq.history_len
-                h_ids = torch.from_numpy(seq.history_token_ids)
+                h_ids = output.new_tensor(seq.history_token_ids)
                 output[idx, :h_len] = h_ids
             return output.to(device)
 
@@ -566,21 +569,22 @@ class Engine:
         with torch.inference_mode(), torch.cuda.stream(self.stream):
             logits = logits_processor(input_ids, split_logits)
             next_token_ids = logits_processor.sampling(logits)
-        self.stream.synchronize()
+        await asyncio.get_event_loop().run_in_executor(None,
+                                                       self.stream.synchronize)
         next_token_ids = next_token_ids.cpu()
 
         return next_token_ids, split_logits
 
+    @logging_timer('UpdateRunning', logger)
     def update_running(self, running: SeqList, next_token_ids: torch.Tensor,
                        meta: Any):
         """update scheduler."""
         for token, msg in zip(next_token_ids, running):
             msg.meta = meta
+            msg.update_token_ids(token)
             msg.num_new_tokens += 1
-            update_token = token
             if msg.num_new_tokens > msg.sampling_param.max_new_tokens:
-                update_token = np.empty((0, ), dtype=np.int64)
-            msg.update_token_ids(update_token)
+                msg.token_ids = torch.empty((0, ), dtype=torch.long)
             if self._stopping_criteria(msg, token):
                 msg.status = MessageStatus.STOPPED
 
@@ -595,6 +599,7 @@ class Engine:
 
         return True
 
+    @logging_timer('ModelForward', logger)
     async def _async_model_forward(self, inputs: ModelInputs,
                                    swap_in_map: Dict, swap_out_map: Dict):
         """model forward."""
@@ -701,6 +706,7 @@ class Engine:
         else:
             return await __long_context_forward(inputs)
 
+    @logging_timer('AsyncStep', logger)
     async def async_step(self, is_prefill: bool, return_logits: bool = False):
         """one step inference. Used to perform streaming chat.
 
@@ -716,6 +722,7 @@ class Engine:
         adapters = schedule_output.adapters
         if len(running) == 0:
             return dict()
+        logger.debug(f'<AsyncStep>: batch_size={len(running)}')
 
         inputs = self.create_model_inputs(running, adapters)
 
@@ -954,7 +961,6 @@ class Engine:
                 await asyncio.sleep(0.01)
                 continue
 
-            logger.debug('async_loop: RequestManager Step.')
             self.req_manager.step()
 
             # forward
@@ -963,8 +969,6 @@ class Engine:
                 is_prefill = not prefill_counter or not has_running
                 if is_prefill:
                     prefill_counter = prefill_interval
-                logger.debug('async_loop: Engine Step - '
-                             f'prefilling: {is_prefill}')
                 with torch.inference_mode():
                     step_tokens: Dict[int,
                                       InferOutput] = await self.async_step(
@@ -972,7 +976,6 @@ class Engine:
                 prefill_counter -= 1
 
                 # send response
-                logger.debug('async_loop: Response.')
                 _send_resp(step_tokens)
 
 

@@ -2,7 +2,7 @@
 from typing import Dict, List
 
 from ...messages import SchedulerSequence
-from ..block_manager import BaseBlockManager
+from ..back_block_manager import BaseBlockManager
 
 SeqList = List[SchedulerSequence]
 

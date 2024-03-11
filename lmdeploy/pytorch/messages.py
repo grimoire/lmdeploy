@@ -296,6 +296,20 @@ class SchedulerSequence:
         """history ids."""
         return self.history_cache[:self.history_len]
 
+    @property
+    def full_token_ids(self) -> int:
+        """full token ids."""
+        return self.history_cache[:self.num_all_tokens()]
+
+    @property
+    def num_history_ids(self):
+        """num history ids."""
+        return self._history_len
+
+    @property
+    def num_token_ids(self):
+        return self._tokens_len
+
     def num_all_tokens(self) -> int:
         """num all tokens."""
         return self.history_len + self._tokens_len
