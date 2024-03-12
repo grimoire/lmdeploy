@@ -214,6 +214,12 @@ class RadixTreeManager:
             num_required += __get_num_cpu_blocks(node)
         return num_required
 
+    def num_seq_required_blocks(self, seq: SchedulerSequence):
+        """num seq required blocks."""
+        num_tokens = seq.num_all_tokens()
+        num_all_blocks = _div_up(num_tokens, seq.block_size)
+        return num_all_blocks - len(seq.logical_blocks)
+
     def new_node(self,
                  token_ids: np.ndarray,
                  blocks: np.ndarray,
@@ -298,7 +304,7 @@ class RadixTreeManager:
             seq_blocks = seq.logical_blocks
             new_seq_blocks = LogicalTokenBlocks(seq_blocks[:-num_blocks])
             seq.logical_blocks = new_seq_blocks
-            new_step = seq.history_len - num_ids
+            new_step = seq.num_all_tokens() - num_ids
             seq.set_step(new_step)
             self.pop_map(node=node)
             new_node = self.add_node(node.parent)
@@ -385,6 +391,8 @@ class RadixTreeManager:
                 match_length = min(num_child_ids, len(token_ids))
                 if num_child_ids == 0:
                     continue
+                if token_ids[0] != child.token_ids[0]:
+                    continue
                 diff: np.ndarray = (
                     token_ids[:match_length] == child.token_ids[:match_length])
                 if match_length == num_child_ids and diff.all():
@@ -434,33 +442,38 @@ class RadixTreeManager:
             max_node_blocks = self.max_node_blocks
             max_node_tokens = self.max_node_tokens
 
-            fill_token_ids = token_ids[:max_node_tokens]
-            fill_blocks = blocks[:max_node_blocks]
+            if len(token_ids) > max_node_tokens:
+                node.token_ids = token_ids[:max_node_tokens]
+                remain_token_ids = token_ids[max_node_tokens:]
+            else:
+                node.token_ids = token_ids
+                remain_token_ids = None
 
-            node.token_ids = fill_token_ids
-            node.blocks = fill_blocks
-
-            remain_token_ids = token_ids[max_node_tokens:]
-            remain_blocks = blocks[max_node_blocks:]
+            if len(blocks) > max_node_blocks:
+                node.blocks = blocks[:max_node_blocks]
+                remain_blocks = blocks[max_node_blocks:]
+            else:
+                node.blocks = blocks
+                remain_blocks = None
             return remain_token_ids, remain_blocks
 
-        node = self.seq_node_map.get(seq.seq_id, None)
-        assert node is not None
+        node = self.seq_node_map[seq.seq_id]
 
         token_ids = seq.full_token_ids
         num_seq_full_ids = len(token_ids)
-        num_node_cum_ids = node.num_cum_ids
+        num_node_cum_ids = seq.num_history_ids
         num_appendable = self.num_appendable_ids(node)
 
-        blocks = __allocate_blocks(num_seq_full_ids,
-                                   num_node_cum_ids + num_appendable)
-        seq.logical_blocks.append(blocks)
+        if num_node_cum_ids + num_appendable < num_seq_full_ids:
+            blocks = __allocate_blocks(num_seq_full_ids,
+                                       num_node_cum_ids + num_appendable)
+            seq.logical_blocks.append(blocks)
 
         # fill first node
         token_ids, blocks = __fill_first_node(
             node, token_ids, seq.logical_blocks.get_real_blocks())
 
-        if len(blocks) > 0:
+        if token_ids is not None and blocks is not None and len(blocks) > 0:
             self.pop_map(node=node)
             node = self.add_node(node, token_ids, blocks)
             self.update_map(seq, node)

@@ -7,6 +7,10 @@ from .base_eviction_helper import BaseEvictionHelper
 class RecomputeEvictionHelper(BaseEvictionHelper):
     """recompute eviction."""
 
+    def num_seq_required_blocks(self, seq: SchedulerSequence):
+        """num seq required blocks."""
+        return self.rtree_manager.num_seq_required_blocks(seq)
+
     def try_update_sequence(self,
                             eviction_nodes,
                             seq: SchedulerSequence,

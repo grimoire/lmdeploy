@@ -138,8 +138,6 @@ class SequenceManager:
         seq_id = seq.seq_id
         status = seq.status
         status_map = self._status_seq_map[status]
-        assert seq_id not in self._seq_map
-        assert seq_id not in status_map
         self._seq_map[seq_id] = seq
         status_map[seq_id] = seq
 
@@ -148,8 +146,6 @@ class SequenceManager:
         seq_id = seq.seq_id
         status = seq.status
         status_map = self._status_seq_map[status]
-        assert seq_id in self._seq_map
-        assert seq_id in status_map
         self._seq_map.pop(seq_id)
         status_map.pop(seq_id)
 
@@ -162,9 +158,6 @@ class SequenceManager:
             return
         old_status_map = self._status_seq_map[old_status]
         new_status_map = self._status_seq_map[new_status]
-        assert seq_id in self._seq_map
-        assert seq_id in old_status_map
-        assert seq_id not in new_status_map
         old_status_map.pop(seq_id)
         new_status_map[seq_id] = seq
 

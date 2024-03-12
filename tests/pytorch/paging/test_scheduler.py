@@ -132,9 +132,9 @@ class TestScheduler:
         seq3 = _add_seq(session, block_size * 3, fill_value=3)
         scheduler.add_sequence(seq3)
         scheduler.schedule(is_prefill=True)
-        # seq1: 1 running gpu
-        # seq2: 2 running gpu
-        # seq3: 3 waiting empty
+        # seq1: 1 running
+        # seq2: 2 running
+        # seq3: 3 waiting
         assert seq1.status == MessageStatus.RUNNING
         assert seq2.status == MessageStatus.RUNNING
         assert seq3.status == MessageStatus.WAITING
@@ -148,9 +148,9 @@ class TestScheduler:
         assert len(scheduler.hanging) == 1
 
         output = scheduler.schedule(is_prefill=True)
-        # seq1: 1 running gpu
-        # seq2: 2 hanging cpu
-        # seq3: 3 waiting gpu
+        # seq1: 1 running
+        # seq2: 2 hanging
+        # seq3: 3 waiting
         assert seq1.status == MessageStatus.RUNNING
         assert seq2.status == MessageStatus.STOPPED
         assert seq3.status == MessageStatus.RUNNING
@@ -161,6 +161,7 @@ class TestScheduler:
         seq2.status = MessageStatus.WAITING
         seq3.status = MessageStatus.ENDED
         seq2.update_token_ids([1] * block_size)
+        seq2.set_step(0)
         scheduler.update()
         assert len(scheduler.running) == 1
         assert len(scheduler.waiting) == 1
@@ -176,8 +177,8 @@ class TestScheduler:
         assert len(output.swap_in_map) == 0
 
         # test running append
-        seq1.update_token_ids([1] * block_size)
-        seq2.update_token_ids([1] * block_size)
+        seq1.update_token_ids([1])
+        seq2.update_token_ids([1])
         scheduler.update()
         assert len(scheduler.running) == 2
         output = scheduler.schedule(is_prefill=False)

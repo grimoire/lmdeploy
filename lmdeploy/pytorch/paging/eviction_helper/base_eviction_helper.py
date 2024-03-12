@@ -19,9 +19,7 @@ class BaseEvictionHelper:
 
     def num_seq_required_blocks(self, seq: SchedulerSequence):
         """num seq required blocks."""
-        num_token_ids = seq.num_token_ids
-        seq_node = self.rtree_manager.seq_node_map[seq.seq_id]
-        return self.rtree_manager.num_required_blocks(num_token_ids, seq_node)
+        raise NotImplementedError('Not implemented.')
 
     def num_adapter_required_blocks(self, adapter: SchedulerAdapter):
         """num adapter required blocks."""

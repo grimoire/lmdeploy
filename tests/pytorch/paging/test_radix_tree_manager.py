@@ -15,8 +15,8 @@ def _np_randint(num: int):
 def _create_seq(session: SchedulerSession,
                 num_tokens: int = 0,
                 num_history: int = 0):
-    seq = session.add_sequence(_np_randint(num_tokens))
-    seq.update_token_ids(_np_randint(num_history))
+    seq = session.add_sequence(_np_randint(num_history))
+    seq.update_token_ids(_np_randint(num_tokens))
     return seq
 
 
@@ -365,6 +365,7 @@ class TestRadixTreeManager:
         seq = _create_seq(session, block_size * 3)
         rtree_manager.add_sequence(seq)
         rtree_manager.update_sequence(seq)
+        seq.update_token_ids([])
         node0 = rtree_manager.seq_node_map[seq.seq_id]
         prev_node, node0 = rtree_manager.split_node(node0, 2)
         prev_node0, prev_node1 = rtree_manager.split_node(prev_node, 1)

@@ -261,6 +261,11 @@ class Scheduler:
                                f'sequence[{seq.seq_id}] '
                                'reach max gpu size.')
                 self._set_message_status(seq, MessageStatus.ABORTED)
+                continue
+
+            if seq.num_token_ids > 1:
+                self._set_message_status(seq, MessageStatus.WAITING)
+                continue
 
             if not __try_update_sequence(seq):
                 self._set_message_status(seq, MessageStatus.WAITING)
