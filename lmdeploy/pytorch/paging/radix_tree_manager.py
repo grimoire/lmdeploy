@@ -88,7 +88,8 @@ node_id={self.node_id},
 token_ids={self.token_ids},
 blocks={self.blocks},
 parent={parent},
-children=[{children_str}])"""
+children=[{children_str}],
+last_visit_time={self.last_visit_time})"""
 
     def __repr__(self):
         return str(self)
@@ -146,6 +147,11 @@ class RadixTreeManager:
     def root(self):
         return self._root
 
+    def add_step_time(self, val: int = 1):
+        """add step time."""
+        self._root.last_visit_time += 1
+        return self.step_time
+
     def _next_new_node_id(self):
         """next new node id."""
         ret = self._max_node_id
@@ -183,12 +189,30 @@ class RadixTreeManager:
         """last block appendable ids."""
         return node.num_blocks * self.block_size - node.num_token_ids
 
-    def num_required_blocks(self, num_tokens: int, node: TreeNode = None):
+    def num_required_blocks(self,
+                            num_tokens: int,
+                            node: TreeNode = None,
+                            check_device: bool = False):
         """num required blocks."""
+
+        def __get_num_cpu_blocks(node: TreeNode):
+            """get num cpu blocks."""
+            num_cpu_blocks = 0
+            while node.parent != self.root:
+                if node.device == 'cpu':
+                    num_cpu_blocks += node.num_blocks
+                node = node.parent
+            return num_cpu_blocks
+
         if node is not None:
             num_last_remain = self.num_appendable_ids(node)
             num_tokens = max(0, num_tokens - num_last_remain)
-        return _div_up(num_tokens, self.cache_config.block_size)
+
+        num_required = _div_up(num_tokens, self.cache_config.block_size)
+
+        if check_device and node is not None:
+            num_required += __get_num_cpu_blocks(node)
+        return num_required
 
     def new_node(self,
                  token_ids: np.ndarray,
@@ -358,11 +382,12 @@ class RadixTreeManager:
             best_match_len = 0
             for child in node.children.values():
                 num_child_ids = child.num_token_ids
+                match_length = min(num_child_ids, len(token_ids))
                 if num_child_ids == 0:
                     continue
                 diff: np.ndarray = (
-                    token_ids[:num_child_ids] == child.token_ids)
-                if diff.all():
+                    token_ids[:match_length] == child.token_ids[:match_length])
+                if match_length == num_child_ids and diff.all():
                     return __match_children(child, token_ids[num_child_ids:],
                                             max_match_len + num_child_ids)
                 match_len = diff.argmin()
@@ -377,10 +402,14 @@ class RadixTreeManager:
 
         return __match_children(self.root, token_ids, 0)
 
-    def can_update_sequence(self, seq: SchedulerSequence):
+    def can_update_sequence(self,
+                            seq: SchedulerSequence,
+                            check_device: bool = False):
         """can update sequence."""
+
         leaf_node = self.seq_node_map.get(seq, None)
-        num_required = self.num_required_blocks(seq.num_token_ids, leaf_node)
+        num_required = self.num_required_blocks(seq.num_token_ids, leaf_node,
+                                                check_device)
         return self._block_manager.can_allocate(num_required)
 
     def update_sequence(self, seq: SchedulerSequence):
@@ -451,7 +480,10 @@ class RadixTreeManager:
                 blocks.append(node.blocks)
                 node = node.parent
             reversed(blocks)
-            blocks = np.concatenate(blocks)
+            if len(blocks) == 0:
+                blocks = _np_empty()
+            else:
+                blocks = np.concatenate(blocks)
             seq.logical_blocks.append(blocks)
 
         node, node_match_len, max_match_len = self.match_node(

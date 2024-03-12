@@ -1,6 +1,5 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Dict
-
+from ...adapter.adapter import SchedulerAdapter
 from ...messages import SchedulerSequence
 from .base_eviction_helper import BaseEvictionHelper
 
@@ -8,36 +7,45 @@ from .base_eviction_helper import BaseEvictionHelper
 class RecomputeEvictionHelper(BaseEvictionHelper):
     """recompute eviction."""
 
-    def __init__(self, block_manager):
-        super().__init__(block_manager)
+    def try_update_sequence(self,
+                            eviction_nodes,
+                            seq: SchedulerSequence,
+                            adapter: SchedulerAdapter = None):
+        """try evict one non-empty node."""
+        num_required = self.num_seq_required_blocks(seq)
+        if adapter is not None:
+            num_ada_required = self.num_adapter_required_blocks(adapter)
+            num_required += num_ada_required
 
-    def need_swap_in(self, seq: SchedulerSequence):
-        """sequence need swap in."""
-        return False
+        num_free_blocks = self.block_manager.get_num_free_gpu_blocks()
+        num_required -= num_free_blocks
 
-    def swap_in(self, seq: SchedulerSequence, swap_in_map: Dict[int, int]):
-        """sequence swap in."""
-        self.block_manager.allocate(seq)
+        can_alloc = True
+        step_time = self.rtree_manager.step_time
+        seq_nodes = []
+        if num_required > 0:
+            seq_node = self.rtree_manager.seq_node_map[seq.seq_id]
+            while seq_node != self.rtree_manager.root:
+                seq_nodes.append(seq_node)
+                seq_node = seq_node.parent
 
-    def swap_out(self, seq: SchedulerSequence, swap_out_map: Dict[int, int]):
-        """sequence swap out."""
-        self.block_manager.free(seq)
-        seq.set_step(0)
-        seq.logical_blocks.reset()
+        while num_required > 0:
+            if len(eviction_nodes) == 0:
+                can_alloc = False
+                break
 
-    def try_swap_out(self, seq: SchedulerSequence, swap_out_map: Dict[int,
-                                                                      int]):
-        """try swap out."""
-        if seq.history_len > 0:
-            self.swap_out(seq, swap_out_map)
-            return True
-        else:
-            return False
+            node = eviction_nodes.pop(0)
+            if node.last_visit_time >= step_time:
+                continue
 
-    def try_swap_in(self, seq: SchedulerSequence, swap_in_map: Dict[int, int]):
-        """try swap in."""
-        if self.block_manager.can_allocate(seq):
-            self.swap_in(seq, swap_in_map)
-            return True
-        else:
-            return False
+            if node in seq_nodes:
+                continue
+
+            num_blocks = node.num_blocks
+            self.rtree_manager.remove_node(node)
+            num_required -= num_blocks
+
+        if can_alloc:
+            self.rtree_manager.update_sequence(seq)
+
+        return can_alloc

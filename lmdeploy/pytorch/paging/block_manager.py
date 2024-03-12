@@ -157,9 +157,9 @@ class LogicalAllocator:
             cpu_blocks = phy_blocks[phy_blocks >= self._cpu_mem_offset]
             gpu_blocks = phy_blocks[phy_blocks < self._cpu_mem_offset]
         elif device == 'cpu':
-            cpu_blocks = blocks
+            cpu_blocks = phy_blocks
         elif device == 'gpu':
-            gpu_blocks = blocks
+            gpu_blocks = phy_blocks
         else:
             raise ValueError(f'Unknown device: {device}')
 

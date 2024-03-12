@@ -114,14 +114,73 @@ def _new_msg_id():
     return seq_id
 
 
+SeqMap = Dict[int, 'SchedulerSequence']
+
+
+class SequenceManager:
+    """sequence manager."""
+
+    def __init__(self) -> None:
+        self._seq_map: SeqMap = dict()
+        self._status_seq_map: Dict[MessageStatus, SeqMap] = dict()
+        self._status_seq_map[MessageStatus.WAITING] = dict()
+        self._status_seq_map[MessageStatus.RUNNING] = dict()
+        self._status_seq_map[MessageStatus.STOPPED] = dict()
+        self._status_seq_map[MessageStatus.ENDED] = dict()
+        self._status_seq_map[MessageStatus.ABORTED] = dict()
+
+    def get_sequences(self, states: MessageStatus):
+        """get sequences."""
+        return self._status_seq_map[states]
+
+    def add_sequence(self, seq: 'SchedulerSequence'):
+        """add sequence."""
+        seq_id = seq.seq_id
+        status = seq.status
+        status_map = self._status_seq_map[status]
+        assert seq_id not in self._seq_map
+        assert seq_id not in status_map
+        self._seq_map[seq_id] = seq
+        status_map[seq_id] = seq
+
+    def remove_sequence(self, seq: 'SchedulerSequence'):
+        """remove sequence."""
+        seq_id = seq.seq_id
+        status = seq.status
+        status_map = self._status_seq_map[status]
+        assert seq_id in self._seq_map
+        assert seq_id in status_map
+        self._seq_map.pop(seq_id)
+        status_map.pop(seq_id)
+
+    def update_sequence_status(self, seq: 'SchedulerSequence',
+                               new_status: MessageStatus):
+        """update status."""
+        seq_id = seq.seq_id
+        old_status = seq.status
+        if new_status == old_status:
+            return
+        old_status_map = self._status_seq_map[old_status]
+        new_status_map = self._status_seq_map[new_status]
+        assert seq_id in self._seq_map
+        assert seq_id in old_status_map
+        assert seq_id not in new_status_map
+        old_status_map.pop(seq_id)
+        new_status_map[seq_id] = seq
+
+
 class SchedulerSession:
     """Scheduler session."""
 
-    def __init__(self, session_id: int, block_size: int) -> None:
+    def __init__(self,
+                 session_id: int,
+                 block_size: int,
+                 seq_manager: SequenceManager = None) -> None:
         self.session_id = session_id
         self.block_size = block_size
         self.status: MessageStatus = MessageStatus.RUNNING
-        self.sequences: Dict[int, SchedulerSequence] = dict()
+        self.sequences: SeqMap = dict()
+        self.seq_manager = seq_manager
 
     def add_sequence(self,
                      token_ids: Tensor,
@@ -148,6 +207,8 @@ class SchedulerSession:
                                 arrive_time=time.time(),
                                 return_logits=return_logits)
         self.sequences[seq.seq_id] = seq
+        if self.seq_manager is not None:
+            self.seq_manager.add_sequence(seq)
         return seq
 
     def fork_sequence(
@@ -176,6 +237,13 @@ class SchedulerSession:
 
         self.sequences[new_msg.seq_id] = new_msg
         return new_msg
+
+    def remove_sequence(self, seq: 'SchedulerSequence'):
+        """remove sequence."""
+        assert seq.seq_id in self.sequences
+        self.sequences.pop(seq.seq_id)
+        if self.seq_manager is not None:
+            self.seq_manager.remove_sequence(seq)
 
 
 def _div_up(x, n):
@@ -285,6 +353,11 @@ class SchedulerSequence:
         return self.session.session_id
 
     @property
+    def seq_manager(self) -> SequenceManager:
+        """sequence manager."""
+        return self.session.seq_manager
+
+    @property
     def token_ids(self) -> int:
         """token ids."""
         start = self.history_len
@@ -310,6 +383,13 @@ class SchedulerSequence:
     def num_token_ids(self):
         return self._tokens_len
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        """set attr."""
+
+        if name == 'status' and self.seq_manager is not None:
+            self.seq_manager.update_sequence_status(self, value)
+        super().__setattr__(name, value)
+
     def num_all_tokens(self) -> int:
         """num all tokens."""
         return self.history_len + self._tokens_len
@@ -330,7 +410,7 @@ class SchedulerSequence:
 
     def set_step(self, step: int):
         """set step."""
+        assert step <= self.num_all_tokens()
         redo_size = self.history_len - step
-        assert redo_size >= 0
         self._history_len -= redo_size
         self._tokens_len += redo_size

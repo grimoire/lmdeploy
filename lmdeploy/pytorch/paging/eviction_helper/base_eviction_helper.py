@@ -1,8 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-from typing import Dict, List
+from typing import List
 
+from ...adapter.adapter import SchedulerAdapter
 from ...messages import SchedulerSequence
-from ..back_block_manager import BaseBlockManager
+from ..scheduler import Scheduler
 
 SeqList = List[SchedulerSequence]
 
@@ -10,33 +11,27 @@ SeqList = List[SchedulerSequence]
 class BaseEvictionHelper:
     """Base eviction helper."""
 
-    def __init__(self, block_manager: BaseBlockManager):
-        self.block_manager: BaseBlockManager = block_manager
+    def __init__(self, scheduler: Scheduler):
+        self.scheduler: Scheduler = scheduler
+        self.block_manager = scheduler.block_manager
+        self.rtree_manager = scheduler.rtree_manager
+        self.cache_config = self.scheduler.cache_config
 
-    def need_swap_in(self, seq: SchedulerSequence):
-        """sequence need swap in."""
+    def num_seq_required_blocks(self, seq: SchedulerSequence):
+        """num seq required blocks."""
+        num_token_ids = seq.num_token_ids
+        seq_node = self.rtree_manager.seq_node_map[seq.seq_id]
+        return self.rtree_manager.num_required_blocks(num_token_ids, seq_node)
+
+    def num_adapter_required_blocks(self, adapter: SchedulerAdapter):
+        """num adapter required blocks."""
+        if adapter.is_actived():
+            return 0
+        return len(adapter.logical_blocks)
+
+    def try_update_sequence(self,
+                            eviction_nodes,
+                            seq: SchedulerSequence,
+                            adapter: SchedulerAdapter = None):
+        """try evict one non-empty node."""
         raise NotImplementedError('Not implemented.')
-
-    def try_swap_out(self, seq: SchedulerSequence, swap_out_map: Dict[int,
-                                                                      int]):
-        """try swap out."""
-        raise NotImplementedError('Not implemented.')
-
-    def try_swap_in(self, seq: SchedulerSequence, swap_in_map: Dict[int, int]):
-        """try swap in."""
-        raise NotImplementedError('Not implemented.')
-
-    def try_swap_out_seqs(self, seqs: SeqList, swap_out_map: Dict[int, int]):
-        """try swap sequence out."""
-        for seq in reversed(seqs):
-            if self.try_swap_out(seq, swap_out_map):
-                return True
-        return False
-
-    def try_swap_out_unused(self, hanging: SeqList, waiting: SeqList,
-                            swap_out_map: Dict[int, int]):
-        """try swap out hanging and waiting sequence."""
-        if self.try_swap_out_seqs(hanging, swap_out_map):
-            return True
-        else:
-            return self.try_swap_out_seqs(waiting, swap_out_map)
