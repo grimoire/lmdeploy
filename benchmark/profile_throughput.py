@@ -313,12 +313,6 @@ def main():
             tp=args.tp,
             thread_safe=True)
 
-    from lmdeploy.utils import get_logger
-    logger = get_logger('lmdeploy')
-    logger.setLevel(10)
-    for handler in logger.handlers:
-        handler.setLevel(10)
-
     engine = Engine(args.model_path, engine_config, csv=args.csv)
 
     requests = sample_requests(args.dataset, args.num_prompts,
