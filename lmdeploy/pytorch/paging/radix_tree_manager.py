@@ -1,6 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Dict
 
 import numpy as np
 
@@ -22,29 +22,34 @@ class TreeNode:
     manager: 'RadixTreeManager'
     token_ids: np.ndarray
     blocks: np.ndarray
-    parent: 'TreeNode' = None
+    parent: 'TreeNode'
     children: Dict[int, 'TreeNode'] = field(init=False, default_factory=dict)
     device: str = 'gpu'
     last_visit_time: int = 0
     sequence: SchedulerSequence = None
+    _parent: 'TreeNode' = field(default=None, init=False, repr=False)
 
-    def __setattr__(self, __name: str, __value: Any) -> None:
-        """set attr."""
+    @property
+    def parent(self):  # noqa: F811
+        """parent getter."""
+        return self._parent
+
+    @parent.setter
+    def parent(self, value: 'TreeNode'):
+        """parent setter."""
 
         def __clear_old_parent():
-            old_parent = self.parent
+            old_parent = self._parent
             if old_parent is not None:
                 old_parent.children.pop(self.node_id, None)
 
         def __update_new_parent():
-            parent: TreeNode = __value
-            if parent is not None:
-                parent.children[self.node_id] = self
+            if value is not None:
+                value.children[self.node_id] = self
 
-        if __name == 'parent':
-            __clear_old_parent()
-            __update_new_parent()
-        super().__setattr__(__name, __value)
+        __clear_old_parent()
+        __update_new_parent()
+        self._parent = value
 
     @property
     def num_blocks(self):

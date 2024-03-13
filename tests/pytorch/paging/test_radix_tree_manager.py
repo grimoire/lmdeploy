@@ -41,7 +41,8 @@ class TestTreeNode:
         root = TreeNode(node_id=0,
                         manager=rtree_manager,
                         token_ids=_np_randint(64),
-                        blocks=_np_randint(4))
+                        blocks=_np_randint(4),
+                        parent=None)
 
         assert root.num_blocks == 4
         assert root.num_token_ids == 64

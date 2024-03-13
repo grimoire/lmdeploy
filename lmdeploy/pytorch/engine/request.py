@@ -7,7 +7,7 @@ from threading import Lock, Thread
 from typing import Any, Awaitable, Callable, Dict, List
 
 from lmdeploy.messages import ResponseType
-from lmdeploy.utils import get_logger
+from lmdeploy.utils import get_logger, logging_timer
 
 logger = get_logger('lmdeploy')
 
@@ -571,6 +571,7 @@ class RequestManager:
                                          ' not exists.'))
                 self.response(resp)
 
+    @logging_timer('RequestStep', logger)
     def step(self, **kwargs):
         """handle requests.
 

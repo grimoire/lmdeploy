@@ -193,7 +193,6 @@ class SchedulerSession:
         seq = SchedulerSequence(seq_id=_new_msg_id(),
                                 session=self,
                                 history_cache=HistoryTokenIds(token_ids),
-                                status=MessageStatus.WAITING,
                                 num_new_tokens=0,
                                 sampling_param=sampling_param,
                                 adapter_name=adapter_name,
@@ -218,7 +217,6 @@ class SchedulerSession:
                                     history_cache=seq.history_cache.clone(),
                                     num_new_tokens=0,
                                     sampling_param=sampling_param,
-                                    status=seq.status,
                                     logical_blocks=seq.logical_blocks.clone(),
                                     adapter_name=seq.adapter_name,
                                     arrive_time=time.time(),
@@ -227,6 +225,7 @@ class SchedulerSession:
                                     random_offsets=seq.random_offsets + 1)
         new_msg._history_len = seq._history_len
         new_msg._tokens_len = seq._tokens_len
+        new_msg.status = seq.status
 
         self.sequences[new_msg.seq_id] = new_msg
         return new_msg
@@ -314,7 +313,6 @@ class SchedulerSequence:
     history_cache: HistoryTokenIds = field(default_factory=HistoryTokenIds)
     num_new_tokens: int = 0
     sampling_param: SamplingParam = field(default_factory=SamplingParam)
-    status: MessageStatus = MessageStatus.WAITING
     logical_blocks: LogicalTokenBlocks = field(
         default_factory=LogicalTokenBlocks)
     sender_id: int = -1
@@ -324,6 +322,7 @@ class SchedulerSequence:
     meta: Any = None
     return_logits: bool = False
     random_offsets: int = 0
+    _status: MessageStatus = field(default=MessageStatus.WAITING, init=False)
 
     def __post_init__(self):
         """post init."""
@@ -354,7 +353,7 @@ class SchedulerSequence:
     def token_ids(self) -> int:
         """token ids."""
         start = self.history_len
-        end = start + self._tokens_len
+        end = self._tokens_len
         return self.history_cache[start:end]
 
     @property
@@ -365,7 +364,7 @@ class SchedulerSequence:
     @property
     def full_token_ids(self) -> int:
         """full token ids."""
-        return self.history_cache[:self.num_all_tokens()]
+        return self.history_cache.get_real()
 
     @property
     def num_history_ids(self):
@@ -374,29 +373,31 @@ class SchedulerSequence:
 
     @property
     def num_token_ids(self):
-        return self._tokens_len
+        return self._tokens_len - self.history_len
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        """set attr."""
+    @property
+    def status(self):
+        return self._status
 
-        if name == 'status' and self.seq_manager is not None:
-            self.seq_manager.update_sequence_status(self, value)
-        super().__setattr__(name, value)
+    @status.setter
+    def status(self, value: MessageStatus):
+        self.seq_manager.update_sequence_status(self, value)
+        self._status = value
 
     def num_all_tokens(self) -> int:
         """num all tokens."""
-        return self.history_len + self._tokens_len
+        return self._tokens_len
 
     def update_token_ids(self, token_ids: Tensor):
         """Update token ids, old token ids will be added to history."""
-        self._history_len += self._tokens_len
+        self._history_len = self._tokens_len
         if isinstance(token_ids, Tensor):
             token_ids = token_ids.numpy()
         elif not isinstance(token_ids, np.ndarray):
             token_ids = np.array(token_ids)
         if token_ids.ndim == 0:
             token_ids = token_ids[None]
-        self._tokens_len = len(token_ids)
+        self._tokens_len += len(token_ids)
         self.history_cache.append(token_ids)
         self.random_offsets += 1
         self.arrive_time = time.time()
@@ -406,4 +407,3 @@ class SchedulerSequence:
         assert step <= self.num_all_tokens()
         redo_size = self.history_len - step
         self._history_len -= redo_size
-        self._tokens_len += redo_size
