@@ -32,11 +32,15 @@ class LoRALinear(torch.nn.Module):
         context = self.context.context
 
         # adapter cache
-        global_adapter_ids = context.global_adapter_ids
         layer_idx = self.layer_idx
-        ranks = self.ranks[global_adapter_ids]
-        block_starts = self.block_starts[global_adapter_ids]
-        scaling = self.scaling[global_adapter_ids]
+        target_name = self._target_name
+        ranks = context.adapter_ranks
+        if target_name in context.adapter_targets:
+            adapter_id = context.adapter_targets[target_name]
+            block_starts = context.adapter_target_starts[adapter_id]
+        else:
+            block_starts = torch.full_like(ranks, -1)
+        scaling = context.adapter_scalings
         k_cache, v_cache = context.kv_caches[layer_idx]
         cache_len = k_cache.size(0)
         a_cache = k_cache.view(cache_len, -1)
@@ -60,6 +64,8 @@ class LoRALinear(torch.nn.Module):
         """lora forward no tp."""
 
         lora_input = self._make_packed_lora_input(x)
+        if len(lora_input.ranks) == 0:
+            return self.base_layer(x)
 
         out_size = self.base_layer.weight.size(0)
         if not lora_input.is_decoding:
@@ -113,6 +119,8 @@ class LoRALinear(torch.nn.Module):
         """lora forward tp rowwise."""
 
         lora_input = self._make_packed_lora_input(x)
+        if len(lora_input.ranks) == 0:
+            return self.base_layer(x)
         rank = dist.get_rank()
         world_size = dist.get_world_size()
         out_size = self.base_layer.weight.size(0) // world_size
@@ -180,6 +188,8 @@ class LoRALinear(torch.nn.Module):
             return gathered_xa
 
         lora_input = self._make_packed_lora_input(x)
+        if len(lora_input.ranks) == 0:
+            return self.base_layer(x)
         world_size = dist.get_world_size()
         out_size = self.base_layer.weight.size(0)
         if not lora_input.is_decoding:

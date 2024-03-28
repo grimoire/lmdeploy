@@ -95,8 +95,11 @@ class ModelInputs:
     history_lengths: List[int]
     is_decoding: bool
     local_adapter_ids: torch.LongTensor = None
-    global_adapter_ids: torch.LongTensor = None
     adapter_offsets: torch.LongTensor = None
+    adapter_ranks: torch.LongTensor = None
+    adapter_scalings: torch.Tensor = None
+    adapter_target_starts: torch.LongTensor = None
+    adapter_targets: Dict[str, int] = None
     max_rank: int = 0
     meta: Any = None
 
@@ -125,8 +128,11 @@ class ModelInputs:
                            history_lengths=history_lengths,
                            is_decoding=self.is_decoding,
                            local_adapter_ids=local_adapter_ids,
-                           global_adapter_ids=self.global_adapter_ids,
                            adapter_offsets=self.adapter_offsets,
+                           adapter_ranks=self.adapter_ranks,
+                           adapter_scalings=self.adapter_scalings,
+                           adapter_target_starts=self.adapter_target_starts,
+                           adapter_targets=self.adapter_targets,
                            max_rank=self.max_rank,
                            meta=self.meta)
 
@@ -154,10 +160,6 @@ class ModelInputs:
             if overlap:
                 block_end += 1
 
-            local_adapter_ids = self.local_adapter_ids
-            if local_adapter_ids is not None:
-                local_adapter_ids = local_adapter_ids[:, start:end]
-
             inp = ModelInputs(
                 input_ids=self.input_ids[:, start:end],
                 seq_length=input_ids.new_tensor([end - start]),
@@ -167,9 +169,12 @@ class ModelInputs:
                 q_start_loc=input_ids.new_zeros(1),
                 history_lengths=[history_len + start],
                 is_decoding=self.is_decoding,
-                local_adapter_ids=local_adapter_ids,
-                global_adapter_ids=self.global_adapter_ids,
+                local_adapter_ids=self.local_adapter_ids,
                 adapter_offsets=self.adapter_offsets,
+                adapter_ranks=self.adapter_ranks,
+                adapter_scalings=self.adapter_scalings,
+                adapter_target_starts=self.adapter_target_starts,
+                adapter_targets=self.adapter_targets,
                 max_rank=self.max_rank,
                 meta=self.meta,
             )
@@ -212,8 +217,11 @@ class StepContext:
     world_size: int = 1
     json_config: Dict = None
     local_adapter_ids: torch.LongTensor = None
-    global_adapter_ids: torch.LongTensor = None
     adapter_offsets: torch.LongTensor = None
+    adapter_ranks: torch.LongTensor = None
+    adapter_scalings: torch.Tensor = None
+    adapter_target_starts: torch.LongTensor = None
+    adapter_targets: Dict[str, int] = None
     max_rank: int = 0
 
     _outputs: Dict = field(default_factory=dict)
@@ -263,8 +271,11 @@ class StepContext:
                           world_size=world_size,
                           json_config=json_config,
                           local_adapter_ids=inputs.local_adapter_ids,
-                          global_adapter_ids=inputs.global_adapter_ids,
                           adapter_offsets=inputs.adapter_offsets,
+                          adapter_ranks=inputs.adapter_ranks,
+                          adapter_scalings=inputs.adapter_scalings,
+                          adapter_target_starts=inputs.adapter_target_starts,
+                          adapter_targets=inputs.adapter_targets,
                           max_rank=inputs.max_rank)
         return ret
 

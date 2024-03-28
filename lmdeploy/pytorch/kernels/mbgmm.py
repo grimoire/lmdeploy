@@ -49,6 +49,9 @@ def _x_a_mm_kernel(
     adapter_id = tl.load(B_adapter_id + cur_batch)
     rank = tl.load(Ranks + adapter_id) // rank_step
     page_start = tl.load(Rank_page_start + adapter_id)
+    if page_start < 0:
+        page_start *= 0
+        rank *= 0
 
     page_table_off = adapter_id * stride_ptb + r_off + page_start
     rank_mask = r_off < rank
@@ -131,6 +134,9 @@ def _acc_b_mm_kernel(
     scaling = tl.load(B_scaling + cur_batch)
     rank = tl.load(Ranks + adapter_id)
     page_start = tl.load(Rank_page_start + adapter_id)
+    if page_start < 0:
+        page_start *= 0
+        rank *= 0
 
     page_table_off = adapter_id * stride_ptb + r_off + page_start
     rank_mask = r_off < rank

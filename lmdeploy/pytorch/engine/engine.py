@@ -466,18 +466,34 @@ class Engine:
         block_offsets = _tensorlize_block_offsets(block_offsets)
 
         local_adapter_ids = None
-        global_adapter_ids = None
         adapter_offsets = None
+        adapter_ranks = None
+        adapter_scalings = None
+        adapter_target_starts = None
+        adapter_targets = None
         max_rank = 0
         if ADAPTER_MANAGER.num_adapters() > 1:
             local_adapter_ids = _get_adapter_ids(messages, adapters)
             local_adapter_ids = seq_length.new_tensor(local_adapter_ids)
+            adapter_ranks = seq_length.new_tensor(
+                [ada.rank for ada in adapters])
+            adapter_scalings = seq_length.new_tensor(
+                [ada.scaling for ada in adapters])
             adapter_offsets = self.scheduler.get_block_tables(adapters)
             adapter_offsets = _tensorlize_block_offsets(adapter_offsets)
-            global_adapter_ids = [ada.idx for ada in adapters]
-            global_adapter_ids = seq_length.new_tensor(global_adapter_ids)
-            ranks = [ada.rank for ada in adapters]
-            max_rank = max(ranks)
+            max_rank = max(adapter_ranks).item()
+            targets = set()
+            for ada in adapters:
+                targets = targets.union(ada.target_modules.keys())
+            targets = list(targets)
+            adapter_targets = dict(zip(targets, range(len(targets))))
+            adapter_target_starts = [None] * len(targets)
+            for idx, target in enumerate(targets):
+                starts = [
+                    ada.target_modules.get(target, -1) for ada in adapters
+                ]
+                adapter_target_starts[idx] = starts
+            adapter_target_starts = torch.tensor(adapter_target_starts)
 
         # add batch dim [bs=1, seq_len]
         if input_ids.ndim == 1:
@@ -492,8 +508,11 @@ class Engine:
                            history_lengths=history_lengths,
                            is_decoding=is_decoding,
                            local_adapter_ids=local_adapter_ids,
-                           global_adapter_ids=global_adapter_ids,
+                           adapter_ranks=adapter_ranks,
+                           adapter_scalings=adapter_scalings,
                            adapter_offsets=adapter_offsets,
+                           adapter_targets=adapter_targets,
+                           adapter_target_starts=adapter_target_starts,
                            max_rank=max_rank,
                            meta=meta)
 
