@@ -95,7 +95,9 @@ class Engine:
                  engine_config: PytorchEngineConfig = None,
                  trust_remote_code: bool = True) -> None:
         check_env()
-        check_model(model_path, trust_remote_code)
+        check_model(model_path,
+                    trust_remote_code,
+                    torch_dtype=engine_config.dtype)
         if engine_config is None:
             engine_config = PytorchEngineConfig()
         if engine_config.adapters is not None:
@@ -133,6 +135,7 @@ class Engine:
             cache_config=cache_config,
             trust_remote_code=trust_remote_code,
             adapters=adapters,
+            torch_dtype=engine_config.dtype,
             tp=tp)
 
         cache_config = self.model_agent.cache_config

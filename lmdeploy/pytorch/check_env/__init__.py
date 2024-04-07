@@ -64,7 +64,8 @@ def check_env():
 
 
 def check_transformers_version(model_path: str,
-                               trust_remote_code: bool = True):
+                               trust_remote_code: bool = True,
+                               torch_dtype: str = None):
     """check transformers version."""
     from packaging import version
     logger = get_logger('lmdeploy')
@@ -118,13 +119,15 @@ def check_transformers_version(model_path: str,
 
         try:
             model_config = ModelConfig.from_hf_config(config,
-                                                      model_path=model_path)
+                                                      model_path=model_path,
+                                                      torch_dtype=torch_dtype)
             if model_config.dtype == torch.bfloat16:
                 assert torch.cuda.is_bf16_supported(), (
                     'bf16 is not supported on your device')
         except AssertionError as e:
             message = (f'Your device does not support `{model_config.dtype}`. '
-                       'Try edit `torch_dtype` in `config.json`.\n'
+                       'Try setup `dtype` in PyTorchEngineConfig '
+                       'or edit `torch_dtype` in `config.json`.\n'
                        'Note that this might have negative effect!')
             _handle_exception(e, 'Model', logger, message=message)
         except Exception as e:
@@ -140,11 +143,13 @@ def check_transformers_version(model_path: str,
     __check_model_dtype_support(config)
 
 
-def check_model(model_path: str, trust_remote_code: bool = True):
+def check_model(model_path: str,
+                trust_remote_code: bool = True,
+                torch_dtype: str = None):
     """check model requirements."""
     logger = get_logger('lmdeploy')
     logger.info('Checking model.')
-    check_transformers_version(model_path, trust_remote_code)
+    check_transformers_version(model_path, trust_remote_code, torch_dtype)
 
 
 def check_adapter(path: str):

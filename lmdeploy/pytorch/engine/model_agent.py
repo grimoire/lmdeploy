@@ -456,12 +456,14 @@ class AutoModelAgent:
                         cache_config: CacheConfig,
                         trust_remote_code: bool,
                         adapters: Dict[str, str] = None,
+                        torch_dtype: str = None,
                         tp: int = 1):
         """from pretrained."""
         return build_model_agent(pretrained_model_name_or_path,
                                  cache_config=cache_config,
                                  trust_remote_code=trust_remote_code,
                                  adapters=adapters,
+                                 torch_dtype=torch_dtype,
                                  tp=tp)
 
 
@@ -1078,10 +1080,13 @@ def build_model_agent(model_path: str,
                       cache_config: CacheConfig,
                       trust_remote_code: bool,
                       adapters: Dict[str, str] = None,
+                      torch_dtype: str = None,
                       tp: int = 1):
     """create model agent."""
     model_config = ModelConfig.from_pretrained(
-        model_path, trust_remote_code=trust_remote_code)
+        model_path,
+        trust_remote_code=trust_remote_code,
+        torch_dtype=torch_dtype)
     if tp == 1:
         model_agent = BaseModelAgent(model_path,
                                      model_config=model_config,

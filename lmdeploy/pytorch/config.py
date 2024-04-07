@@ -4,6 +4,20 @@ from typing import Any, Dict
 
 import torch
 
+from lmdeploy.utils import get_logger
+
+logger = get_logger('lmdeploy')
+
+
+def _str2dtype(torch_dtype: str):
+    """string to torch.dtype."""
+    try:
+        return eval(f'torch.{torch_dtype}')
+    except Exception as e:
+        logger.error(f'Can not convert `{torch_dtype}` to `torch.dtype`. '
+                     'Please set a valid torch dtype.')
+        raise e
+
 
 def _get_torch_dtype(config: Any, default: str = 'float16'):
     """Get the torch dtype from the model config.
@@ -29,7 +43,7 @@ def _get_torch_dtype(config: Any, default: str = 'float16'):
     torch_dtype = getattr(config, 'torch_dtype', default)
     # torch_dtype in config could be none
     torch_dtype = torch_dtype or default
-    return eval(f'torch.{torch_dtype}')
+    return _str2dtype(torch_dtype)
 
 
 @dataclass
@@ -82,15 +96,20 @@ class ModelConfig:
     @classmethod
     def from_pretrained(cls,
                         pretrained_model_name_or_path: str,
-                        trust_remote_code: bool = True):
+                        trust_remote_code: bool = True,
+                        torch_dtype: str = None):
         """build ModelConfig from model path or name."""
         from transformers import AutoConfig
         hf_config = AutoConfig.from_pretrained(
             pretrained_model_name_or_path, trust_remote_code=trust_remote_code)
-        return cls.from_hf_config(hf_config, pretrained_model_name_or_path)
+        return cls.from_hf_config(hf_config, pretrained_model_name_or_path,
+                                  torch_dtype)
 
     @classmethod
-    def from_hf_config(cls, hf_config: Any, model_path: str = None):
+    def from_hf_config(cls,
+                       hf_config: Any,
+                       model_path: str = None,
+                       torch_dtype: str = None):
         """from huggingface config."""
         if model_path is None:
             model_path = ''
@@ -202,6 +221,13 @@ class ModelConfig:
             model_config = __build_default()
 
         model_config.dtype = _get_torch_dtype(hf_config)
+        if torch_dtype is not None:
+            torch_dtype = _str2dtype(torch_dtype)
+            if model_config.dtype != torch_dtype:
+                logger.warning(f'dtype={torch_dtype} is different from the '
+                               f'model default dtype={model_config.dtype}. '
+                               'This might leads to unexpected result.')
+                model_config.dtype = torch_dtype
 
         model_config.hf_config = hf_config
         model_config.json_config = hf_config.to_dict()
