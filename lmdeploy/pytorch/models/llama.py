@@ -17,6 +17,7 @@ from ..kernels import (fill_kv_cache, fused_rotary_emb, paged_attention_fwd,
 from .functional import attention_forward_with_rerope, repeat_kv
 
 TRANSFORMERS_VERSION = version.parse(transformers.__version__)
+VERSION_4380 = version.parse('4.38.0')
 
 
 class LlamaRMSNorm(nn.Module):
@@ -259,7 +260,7 @@ class LlamaAttention(nn.Module):
 
         def __rotary_emb_fn(query_states, key_states, value_states):
             """rotary embedding."""
-            if TRANSFORMERS_VERSION >= version.parse('4.38.0'):
+            if TRANSFORMERS_VERSION >= VERSION_4380:
                 return __rotary_emb_fn_438(query_states, key_states,
                                            value_states)
             else:
