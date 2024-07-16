@@ -11,6 +11,14 @@ def _div_up(a, b):
 class TestFillKVCache:
 
     @pytest.fixture
+    def device(self):
+        yield 'cuda'
+
+    @pytest.fixture
+    def dtype(self):
+        yield torch.float16
+
+    @pytest.fixture
     def num_heads(self):
         yield 4
 
@@ -68,8 +76,12 @@ class TestFillKVCache:
         yield torch.tensor(kv_lens).cuda()
 
     @pytest.fixture
-    def k_states(self, num_tokens, num_heads, head_dim):
-        yield torch.rand(num_tokens, num_heads, head_dim).cuda()
+    def k_states(self, num_tokens, num_heads, head_dim, dtype, device):
+        yield torch.rand(num_tokens,
+                         num_heads,
+                         head_dim,
+                         dtype=dtype,
+                         device=device)
 
     @pytest.fixture
     def v_states(self, k_states):
@@ -77,13 +89,20 @@ class TestFillKVCache:
 
     @pytest.fixture
     def k_caches(self, batch_size, max_num_blocks, block_size, num_heads,
-                 head_dim):
-        shape = (batch_size * max_num_blocks, block_size, num_heads, head_dim)
-        yield torch.full(shape, 0.0).cuda()
+                 head_dim, dtype, device):
+        elem_size = torch.empty((0, ), dtype=dtype,
+                                device='meta').element_size()
+        x = 16 // elem_size
+        assert head_dim % x == 0
+        shape = (batch_size * max_num_blocks, num_heads, head_dim // x,
+                 block_size, x)
+        yield torch.full(shape, 0.0, dtype=dtype, device=device)
 
     @pytest.fixture
-    def v_caches(self, k_caches):
-        yield torch.rand_like(k_caches)
+    def v_caches(self, batch_size, max_num_blocks, block_size, num_heads,
+                 head_dim, dtype, device):
+        shape = (batch_size * max_num_blocks, num_heads, head_dim, block_size)
+        yield torch.full(shape, 0.0, dtype=dtype, device=device)
 
     @pytest.fixture
     def block_offsets(self, num_blocks_per_input):
@@ -100,6 +119,12 @@ class TestFillKVCache:
         batch_size = len(seq_lens)
         k_caches = k_caches.clone()
         v_caches = v_caches.clone()
+
+        # permute
+        x = k_caches.size(-1)
+        k_caches = k_caches.transpose(2, 3).flatten(-2)
+
+        # fill cache
         splited_k_states = k_states.split(seq_lens)
         splited_v_states = v_states.split(seq_lens)
         for bidx in range(batch_size):
@@ -112,11 +137,11 @@ class TestFillKVCache:
             fill_size = min(block_size - fill_start, k_state.size(0))
             while True:
                 boff = b_offs[block_id]
-                tmp_ks = k_state[:fill_size]
-                tmp_vs = v_state[:fill_size]
+                tmp_ks = k_state[:fill_size].transpose(0, 1)
+                tmp_vs = v_state[:fill_size].permute(1, 2, 0)
                 fill_end = fill_start + fill_size
-                k_caches[boff, fill_start:fill_end] = tmp_ks
-                v_caches[boff, fill_start:fill_end] = tmp_vs
+                k_caches[boff, :, fill_start:fill_end] = tmp_ks
+                v_caches[boff, :, :, fill_start:fill_end] = tmp_vs
                 k_state = k_state[fill_size:]
                 v_state = v_state[fill_size:]
                 block_id += 1
@@ -124,6 +149,9 @@ class TestFillKVCache:
                 fill_size = min(block_size, k_state.size(0))
                 if fill_size == 0:
                     break
+
+        # permute back
+        k_caches = k_caches.unflatten(-1, (-1, x)).transpose(2, 3)
 
         yield k_caches, v_caches
 

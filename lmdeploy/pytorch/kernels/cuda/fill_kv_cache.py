@@ -32,12 +32,14 @@ def _div_up(val, other):
     stride_kcn=int,
     stride_kcb=int,
     stride_kch=int,
-    stride_kcd=int,
+    stride_kcd0=int,
+    stride_kcd1=int,
     stride_vcn=int,
     stride_vcb=int,
     stride_vch=int,
     stride_vcd=int,
     stride_boff=int,
+    kx=torch.int32,
     BLOCK=torch.int32,
     BLOCK_D=torch.int32,
     BLOCK_DV=torch.int32,
@@ -56,20 +58,22 @@ def _fill_kv_cache_kernel(
     num_heads: tl.constexpr,
     head_dim: tl.constexpr,
     stride_kss,
-    stride_ksh,
-    stride_ksd,
+    stride_ksh: tl.constexpr,
+    stride_ksd: tl.constexpr,
     stride_vss,
-    stride_vsh,
-    stride_vsd,
+    stride_vsh: tl.constexpr,
+    stride_vsd: tl.constexpr,
     stride_kcn: tl.constexpr,
     stride_kcb: tl.constexpr,
     stride_kch: tl.constexpr,
-    stride_kcd: tl.constexpr,
+    stride_kcd0: tl.constexpr,
+    stride_kcd1: tl.constexpr,
     stride_vcn: tl.constexpr,
     stride_vcb: tl.constexpr,
     stride_vch: tl.constexpr,
     stride_vcd: tl.constexpr,
     stride_boff,
+    kx: tl.constexpr,
     BLOCK: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_DV: tl.constexpr,
@@ -82,6 +86,8 @@ def _fill_kv_cache_kernel(
     # initialize
     h_off = tl.arange(0, BLOCK_H)
     d_off = tl.arange(0, BLOCK_D)
+    d0_off = d_off // kx
+    d1_off = d_off % kx
 
     q_startloc = tl.load(QStartLoc + batch_id)
     q_seqlen = tl.load(QSeqLens + batch_id)
@@ -97,11 +103,18 @@ def _fill_kv_cache_kernel(
     block_off = tl.load(BlockOffsets + batch_id * stride_boff + kv_block_id)
 
     cur_startloc = q_startloc + state_token_offset
-    ks_ptr = KStates + cur_startloc * stride_kss
-    vs_ptr = VStates + cur_startloc * stride_vss
+    ks_ptr = (KStates + cur_startloc * stride_kss +
+              h_off[:, None] * stride_ksh + d_off[None, :] * stride_ksd)
 
-    kc_ptr = KCaches + block_off * stride_kcn
-    vc_ptr = VCaches + block_off * stride_vcn
+    kc_ptr = (KCaches + block_off * stride_kcn + h_off[:, None] * stride_kch +
+              d0_off[None, :] * stride_kcd0 + d1_off[None, :] * stride_kcd1)
+
+    if BLOCK_DV > 0:
+        dv_off = tl.arange(0, BLOCK_DV)
+        vs_ptr = (VStates + cur_startloc * stride_vss +
+                  h_off[:, None] * stride_vsh + dv_off[None, :] * stride_vsd)
+        vc_ptr = (VCaches + block_off * stride_vcn +
+                  h_off[:, None] * stride_vch + dv_off[None, :] * stride_vcd)
 
     c_first_tokenloc = block0_first_tokenloc
     if block_id != 0:
@@ -112,25 +125,13 @@ def _fill_kv_cache_kernel(
     for bidx in range(c_first_tokenloc, c_last_tokenloc):
         sidx = bidx - c_first_tokenloc
         mask = (h_off[:, None] < num_heads) & (d_off[None, :] < head_dim)
-        k = tl.load(ks_ptr + sidx * stride_kss + h_off[:, None] * stride_ksh +
-                    d_off[None, :] * stride_ksd,
-                    mask=mask)
-        tl.store(kc_ptr + bidx * stride_kcb + h_off[:, None] * stride_kch +
-                 d_off[None, :] * stride_kcd,
-                 k,
-                 mask=mask)
+        k = tl.load(ks_ptr + sidx * stride_kss, mask=mask)
+        tl.store(kc_ptr + bidx * stride_kcb, k, mask=mask)
 
         if BLOCK_DV > 0:
-            dv_off = tl.arange(0, BLOCK_DV)
             maskv = (h_off[:, None] < num_heads) & (dv_off[None, :] < head_dim)
-            v = tl.load(vs_ptr + sidx * stride_vss +
-                        h_off[:, None] * stride_vsh +
-                        dv_off[None, :] * stride_vsd,
-                        mask=maskv)
-            tl.store(vc_ptr + bidx * stride_vcb + h_off[:, None] * stride_vch +
-                     dv_off[None, :] * stride_vcd,
-                     v,
-                     mask=maskv)
+            v = tl.load(vs_ptr + sidx * stride_vss, mask=maskv)
+            tl.store(vc_ptr + bidx * stride_vcb, v, mask=maskv)
 
 
 def fill_kv_cache(k_states: Tensor, v_states: Tensor, k_caches: Tensor,
@@ -141,9 +142,18 @@ def fill_kv_cache(k_states: Tensor, v_states: Tensor, k_caches: Tensor,
 
     block_offsets = block_offsets.contiguous()
     batch_size = block_offsets.size(0)
-    block_size, num_heads, head_dim = k_caches.size()[1:]
+    num_heads, head_dim0, block_size, head_dim1 = k_caches.size()[1:]
+    head_dim = head_dim0 * head_dim1
     head_dim_v = v_states.size(-1)
     max_num_blocks = triton.cdiv(max_q_seq_length, block_size) + 1
+
+    stride_kss, stride_ksh, stride_ksd = k_states.stride()[-3:]
+    stride_vss, stride_vsh, stride_vsd = v_states.stride()[-3:]
+    (stride_kcn, stride_kch, stride_kcd0, stride_kcb,
+     stride_kcd1) = k_caches.stride()
+    (stride_vcn, stride_vch, stride_vcd, stride_vcb) = v_caches.stride()
+
+    kx = k_caches.size(-1)
 
     BLOCK = block_size
     BLOCK_H = triton.next_power_of_2(num_heads)
@@ -162,21 +172,23 @@ def fill_kv_cache(k_states: Tensor, v_states: Tensor, k_caches: Tensor,
         block_offsets,
         num_heads=num_heads,
         head_dim=head_dim,
-        stride_kss=k_states.stride(-3),
-        stride_ksh=k_states.stride(-2),
-        stride_ksd=k_states.stride(-1),
-        stride_vss=v_states.stride(-3),
-        stride_vsh=v_states.stride(-2),
-        stride_vsd=v_states.stride(-1),
-        stride_kcn=k_caches.stride(0),
-        stride_kcb=k_caches.stride(1),
-        stride_kch=k_caches.stride(2),
-        stride_kcd=k_caches.stride(3),
-        stride_vcn=v_caches.stride(0),
-        stride_vcb=v_caches.stride(1),
-        stride_vch=v_caches.stride(2),
-        stride_vcd=v_caches.stride(3),
+        stride_kss=stride_kss,
+        stride_ksh=stride_ksh,
+        stride_ksd=stride_ksd,
+        stride_vss=stride_vss,
+        stride_vsh=stride_vsh,
+        stride_vsd=stride_vsd,
+        stride_kcn=stride_kcn,
+        stride_kcb=stride_kcb,
+        stride_kch=stride_kch,
+        stride_kcd0=stride_kcd0,
+        stride_kcd1=stride_kcd1,
+        stride_vcn=stride_vcn,
+        stride_vcb=stride_vcb,
+        stride_vch=stride_vch,
+        stride_vcd=stride_vcd,
         stride_boff=block_offsets.stride(0),
+        kx=kx,
         BLOCK=BLOCK,
         BLOCK_D=BLOCK_D,
         BLOCK_DV=BLOCK_DV,

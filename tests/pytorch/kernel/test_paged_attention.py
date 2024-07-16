@@ -31,10 +31,10 @@ def _make_blocked_cache(batched_k, batched_v, seq_lens, history_lens,
                         feat_dim_v):
     max_blocks_nums = block_offsets.max() + 1
     full_seq_lens = seq_lens + history_lens
-    blocked_k = batched_k.new_zeros(max_blocks_nums, block_size, num_heads_k,
+    blocked_k = batched_k.new_zeros(max_blocks_nums, num_heads_k, block_size,
                                     feat_dim)
-    blocked_v = batched_v.new_zeros(max_blocks_nums, block_size, num_heads_k,
-                                    feat_dim_v)
+    blocked_v = batched_v.new_zeros(max_blocks_nums, num_heads_k, feat_dim_v,
+                                    block_size)
 
     for batch_id, offset in enumerate(block_offsets):
         ori_k = batched_k[batch_id]
@@ -45,8 +45,12 @@ def _make_blocked_cache(batched_k, batched_v, seq_lens, history_lens,
             tmp_k = ori_k[block_start:block_start + block_size]
             tmp_v = ori_v[block_start:block_start + block_size]
             size = tmp_k.size(0)
-            blocked_k[block_off, :size] = tmp_k
-            blocked_v[block_off, :size] = tmp_v
+            blocked_k[block_off, :, :size] = tmp_k.transpose(0, 1)
+            blocked_v[block_off, :, :, :size] = tmp_v.permute(1, 2, 0)
+
+    kx = 16 // batched_k.element_size()
+    blocked_k = blocked_k.unflatten(-1, (-1, kx)).transpose(2, 3)
+    blocked_k = blocked_k.contiguous()
 
     return blocked_k, blocked_v
 
@@ -229,11 +233,15 @@ class TestPagedAttention:
 
     @pytest.mark.parametrize('feat_dim', [48, 32], indirect=True)
     @pytest.mark.parametrize('feat_dim_v', [32], indirect=True)
-    @pytest.mark.parametrize(['num_heads_q', 'num_heads_k'], [(8, 2), (2, 2)],
+    @pytest.mark.parametrize(['num_heads_q', 'num_heads_k'], [
+        (8, 2),
+        (2, 2),
+    ],
                              indirect=True)
-    @pytest.mark.parametrize(['seq_lens', 'history_lens'],
-                             [([30, 50, 70, 90], [50, 40, 30, 20]),
-                              ([1, 1, 1, 1], [50, 40, 30, 20])],
+    @pytest.mark.parametrize(['seq_lens', 'history_lens'], [
+        ([30, 50, 70, 90], [50, 40, 30, 20]),
+        ([1, 1, 1, 1], [50, 40, 30, 20]),
+    ],
                              indirect=True)
     @pytest.mark.parametrize('block_size', [16], indirect=True)
     def test_paged_attention(self, conti_q, blocked_kv, block_offsets,

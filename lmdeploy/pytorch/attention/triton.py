@@ -27,10 +27,16 @@ class TritonAttentionBackend(AttentionBackend):
         head_size: int,
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
+        elem_size = torch.empty((0, ), dtype=dtype,
+                                device='meta').element_size()
+        x = 16 // elem_size
+        assert head_size % x == 0
+
         return (
-            block_size,
             num_heads,
-            head_size,
+            head_size // x,
+            block_size,
+            x,
         )
 
     @staticmethod
@@ -41,9 +47,9 @@ class TritonAttentionBackend(AttentionBackend):
         dtype: torch.dtype,
     ) -> Tuple[int, ...]:
         return (
-            block_size,
             num_heads,
             head_size,
+            block_size,
         )
 
 
