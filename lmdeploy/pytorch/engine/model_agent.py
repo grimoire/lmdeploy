@@ -762,6 +762,7 @@ def _exit_by_sending_exit_flag(rank: int, agent: TPModelAgent):
     # send exit_flag to all subprocess relying on all subprocess are alive
     # and wait at _broadcast_inputs
     exit_flag = True
+    agent.mp_bar.wait()
     _broadcast_inputs(rank, [None, None, None, exit_flag], agent.stream)
     agent.stream.synchronize()
 
