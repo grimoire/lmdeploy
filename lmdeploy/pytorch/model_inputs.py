@@ -32,18 +32,20 @@ class MRopeModelInputs:
         mrope_position_ids = torch.cat(mrope_position_ids, dim=-1)
         return mrope_position_ids
 
-    def to_device(self, device: str):
+    def to_device(self, device: str, non_blocking: bool = False):
         """to device."""
         out_dict = dict()
         for f in fields(self):
             k = f.name
             v = getattr(self, k)
             if isinstance(v, torch.Tensor):
-                v = v.to(device)
+                v = v.to(device, non_blocking=True)
             elif isinstance(v, list):
-                v = [x.to(device) for x in v]
+                v = [x.to(device, non_blocking=True) for x in v]
             out_dict[k] = v
 
+        if not non_blocking:
+            torch.cuda.current_stream().synchronize()
         return MRopeModelInputs(**out_dict)
 
 
@@ -57,20 +59,22 @@ class VisionModelInputs:
     input_embedding_ranges: List[torch.LongTensor] = None
     input_embedding_indexing: torch.BoolTensor = None
 
-    def to_device(self, device: str):
+    def to_device(self, device: str, non_blocking: bool = False):
         """to device."""
         out_dict = dict()
         for f in fields(self):
             k = f.name
             v = getattr(self, k)
             if isinstance(v, torch.Tensor):
-                v = v.to(device)
+                v = v.to(device, non_blocking=True)
             elif k == 'input_embedding_ranges' and v is not None:
-                v = [e.to(device) for e in v]
+                v = [e.to(device, non_blocking=True) for e in v]
             elif k == 'input_embeddings' and v is not None:
-                v = [[e.to(device) for e in li] for li in v]
+                v = [[e.to(device, non_blocking=True) for e in li] for li in v]
             out_dict[k] = v
 
+        if not non_blocking:
+            torch.cuda.current_stream().synchronize()
         return VisionModelInputs(**out_dict)
 
     def get_inputs(self, history_lengths: torch.Tensor,
@@ -170,20 +174,22 @@ class ModelInputs:
 
         return ret
 
-    def to_device(self, device: str):
+    def to_device(self, device: str, non_blocking: bool = False):
         """to device."""
         out_dict = dict()
         for f in fields(self):
             k = f.name
             v = getattr(self, k)
             if isinstance(v, torch.Tensor):
-                v = v.to(device)
+                v = v.to(device, non_blocking=True)
             elif isinstance(v, VisionModelInputs):
-                v = v.to_device(device)
+                v = v.to_device(device, non_blocking=True)
             elif isinstance(v, MRopeModelInputs):
-                v = v.to_device(device)
+                v = v.to_device(device, non_blocking=True)
             out_dict[k] = v
 
+        if not non_blocking:
+            torch.cuda.current_stream().synchronize()
         return ModelInputs(**out_dict)
 
 

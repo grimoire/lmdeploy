@@ -289,6 +289,7 @@ class FusedLogitsProcessor(LogitsWarper):
         self.ignore_eos = ignore_eos
         self.tokenizer = tokenizer
 
+    @torch.inference_mode()
     def __call__(self, all_ids: torch.LongTensor,
                  guided_input_ids: torch.LongTensor,
                  scores: torch.FloatTensor) -> torch.FloatTensor:
@@ -308,7 +309,6 @@ class FusedLogitsProcessor(LogitsWarper):
 
         """
         sampling_inputs = self.sampling_inputs
-        scores = scores.clone()
 
         custom_logits_processors = self.sampling_inputs.logits_processors
         if any(custom_logits_processors):

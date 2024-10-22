@@ -162,7 +162,8 @@ class Engine:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.backend_config = backend_config
-        self.stream = torch.cuda.Stream()
+        self.stream = self.model_agent.stream
+        self.d2h_stream = torch.cuda.Stream()
 
         self.req_manager = self._bind_request_manager()
 
@@ -526,7 +527,7 @@ class Engine:
             last_idx = seq_length.cumsum(-1) - 1
             return logits[last_idx, :]
 
-        split_logits = __get_last_logits().cuda()
+        split_logits = __get_last_logits()
         logits_processor = FusedLogitsProcessor(sampling_inputs, ignore_eos,
                                                 self.tokenizer.model.model)
         logits = logits_processor(all_ids, guided_input_ids, split_logits)
@@ -642,8 +643,9 @@ class Engine:
         ret['logits'] = logits
         return ret
 
-    def _make_infer_outputs(self, next_token_ids: torch.LongTensor,
-                            logits: torch.Tensor, stopped: torch.Tensor):
+    async def _make_infer_outputs(self, next_token_ids: torch.LongTensor,
+                                  logits: torch.Tensor, stopped: torch.Tensor,
+                                  event: torch.cuda.Event):
         """make infer output."""
 
         def __get_out_token_ids(token: torch.Tensor, msg: SchedulerSequence,
@@ -664,6 +666,11 @@ class Engine:
             else:
                 return seq_length.cumsum(0) - seq_length
 
+        with torch.cuda.stream(self.d2h_stream):
+            while not event.query():
+                await asyncio.sleep(0)
+            next_token_ids = next_token_ids.to('cpu', non_blocking=True)
+            stopped = stopped.to('cpu', non_blocking=False)
         running = self._running
         is_run = [seq.status == MessageStatus.RUNNING for seq in running]
         stopped = stopped.tolist()
@@ -755,10 +762,11 @@ class Engine:
                 next_token_ids, sampling_inputs.stop_words, num_appendable_ids)
 
             # send output
-            stopped = stopped.cpu()
-            finish = stopped.all().item() or (idx == loop_count - 1)
+            finish = (idx == loop_count - 1)
             finish = finish or _check_finish(self.scheduler, idx)
-            output = (next_token_ids.cpu(), logits, stopped)
+            event = torch.cuda.Event()
+            event.record(self.stream)
+            output = (next_token_ids, logits, stopped, event)
             output_que.put_nowait((finish, output))
 
             if finish:
@@ -921,9 +929,9 @@ class Engine:
                 try:
                     if isinstance(out, Exception):
                         raise out
-                    next_token_ids, logits, stopped = out
-                    step_outputs = self._make_infer_outputs(
-                        next_token_ids, logits, stopped)
+                    next_token_ids, logits, stopped, event = out
+                    step_outputs = await self._make_infer_outputs(
+                        next_token_ids, logits, stopped, event)
                     __send_resps(step_outputs)
                 except Exception as e:
                     raise e
