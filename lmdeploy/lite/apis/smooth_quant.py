@@ -19,8 +19,16 @@ def smooth_quant(model: str,
                  search_scale: bool = False,
                  batch_size: int = 1,
                  w_bits: int = 8,
-                 device: str = 'cuda'):
+                 device: str = 'cuda',
+                 quant_dtype: str = 'int8'):
+    quant_dtype_s = quant_dtype
+    quant_dtype = eval(f'torch.{quant_dtype}')
+    if quant_dtype.is_floating_point:
+        q_dtype_info = torch.finfo(quant_dtype)
+    else:
+        q_dtype_info = torch.iinfo(quant_dtype)
 
+    assert q_dtype_info.bits == w_bits
     model_path = model
     vl_model, model, tokenizer, work_dir = calibrate(model,
                                                      calib_dataset,
@@ -77,7 +85,7 @@ def smooth_quant(model: str,
 
     for name, linear in fcs.items():
         linear.to(device)
-        q_linear = QLinear.from_float(linear)
+        q_linear = QLinear.from_float(linear, quant_dtype=quant_dtype)
         parent_name, _, child_name = name.rpartition('.')
         parent = model.get_submodule(parent_name)
         setattr(parent, child_name, q_linear)
@@ -85,7 +93,7 @@ def smooth_quant(model: str,
 
     for name, norm in rmsnorms.items():
         norm.to(device)
-        q_norm = QRMSNorm.from_float(norm)
+        q_norm = QRMSNorm.from_float(norm, quant_dtype=quant_dtype)
         parent_name, _, child_name = name.rpartition('.')
         parent = model.get_submodule(parent_name)
         setattr(parent, child_name, q_norm)
@@ -96,7 +104,8 @@ def smooth_quant(model: str,
         save_vl_model(vl_model, model_path, work_dir)
     else:
         model.config.update(
-            dict(quantization_config=dict(quant_method='smooth_quant')))
+            dict(quantization_config=dict(quant_method='smooth_quant',
+                                          quant_dtype=f'{quant_dtype_s}')))
         model.save_pretrained(work_dir,
                               max_shard_size='2GB',
                               safe_serialization=False)
