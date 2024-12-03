@@ -108,6 +108,7 @@ class ModelConfig:
     hf_config: Any = None
     cogvlm_style: bool = False
     custom_module_map: Dict[str, setattr] = None
+    sub_model_paths: List[str] = None
 
     def get_head_size(self):
         """get head size."""

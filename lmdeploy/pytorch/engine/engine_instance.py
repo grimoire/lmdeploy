@@ -132,6 +132,7 @@ class EngineInstance:
                                  gen_config: GenerationConfig = None,
                                  multimodal: InputMultiModalType = None,
                                  adapter_name: str = None,
+                                 prefix_req_id: int = None,
                                  **kwargs):
         """Send stream inference request.
 
@@ -160,6 +161,7 @@ class EngineInstance:
             sampling_param=sampling_param,
             adapter_name=adapter_name,
             input_multimodals=multimodal,
+            prefix_req_id=prefix_req_id,
         )
         req_id = await self.req_sender.async_send_async(
             RequestType.ADD_MESSAGE, msg)
@@ -172,13 +174,19 @@ class EngineInstance:
                 continue
             if resp.type == ResponseType.SUCCESS:
                 token_ids += resp.data['token_ids']
-                yield EngineOutput(resp.type, token_ids, len(token_ids))
+                yield EngineOutput(resp.type,
+                                   token_ids,
+                                   len(token_ids),
+                                   req_id=req_id)
             elif resp.type == ResponseType.FINISH:
                 token_ids += resp.data['token_ids']
-                yield EngineOutput(resp.type, token_ids, len(token_ids))
+                yield EngineOutput(resp.type,
+                                   token_ids,
+                                   len(token_ids),
+                                   req_id=req_id)
                 break
             else:
-                yield EngineOutput(resp.type, [], 0)
+                yield EngineOutput(resp.type, [], 0, req_id=req_id)
                 break
 
     async def async_infer(self,
@@ -200,17 +208,22 @@ class EngineInstance:
             int: The number of the output tokens.
         """
         token_ids = []
+        req_id = None
         async for outputs in self.async_stream_infer(session_id,
                                                      input_ids,
                                                      multimodal=multimodal,
                                                      gen_config=gen_config,
                                                      **kwargs):
             status, tmp_ids = outputs.status, outputs.token_ids
+            req_id = outputs.req_id
             if status not in [ResponseType.SUCCESS, ResponseType.FINISH]:
-                return EngineOutput(status, token_ids, len(token_ids))
+                return EngineOutput(status,
+                                    token_ids,
+                                    len(token_ids),
+                                    req_id=req_id)
             token_ids = tmp_ids
 
-        return EngineOutput(0, token_ids, len(token_ids))
+        return EngineOutput(0, token_ids, len(token_ids), req_id)
 
     def stream_infer(self,
                      session_id: int,
@@ -218,6 +231,7 @@ class EngineInstance:
                      multimodal: InputMultiModalType = None,
                      gen_config: GenerationConfig = None,
                      adapter_name: str = None,
+                     prefix_req_id: int = None,
                      **kwargs):
         """Send stream inference request.
 
@@ -243,6 +257,7 @@ class EngineInstance:
                                                multimodal=multimodal,
                                                gen_config=gen_config,
                                                adapter_name=adapter_name,
+                                               prefix_req_id=prefix_req_id,
                                                **kwargs)
             while True:
                 try:
@@ -265,6 +280,7 @@ class EngineInstance:
             sampling_param=sampling_param,
             adapter_name=adapter_name,
             input_multimodals=multimodal,
+            prefix_req_id=prefix_req_id,
         )
         req_id = self.req_sender.send_async(RequestType.ADD_MESSAGE, msg)
 
@@ -276,13 +292,19 @@ class EngineInstance:
                 continue
             if resp.type == ResponseType.SUCCESS:
                 token_ids += resp.data['token_ids']
-                yield EngineOutput(resp.type, token_ids, len(token_ids))
+                yield EngineOutput(resp.type,
+                                   token_ids,
+                                   len(token_ids),
+                                   req_id=req_id)
             elif resp.type == ResponseType.FINISH:
                 token_ids += resp.data['token_ids']
-                yield EngineOutput(resp.type, token_ids, len(token_ids))
+                yield EngineOutput(resp.type,
+                                   token_ids,
+                                   len(token_ids),
+                                   req_id=req_id)
                 break
             else:
-                yield EngineOutput(resp.type, [], 0)
+                yield EngineOutput(resp.type, [], 0, req_id=req_id)
                 break
 
     def infer(self,
@@ -304,17 +326,22 @@ class EngineInstance:
             int: The number of the output tokens.
         """
         token_ids = []
+        req_id = None
         for outputs in self.stream_infer(session_id,
                                          input_ids,
                                          multimodal=multimodal,
                                          gen_config=gen_config,
                                          **kwargs):
             status, tmp_ids = outputs.status, outputs.token_ids
+            req_id = req_id
             if status not in [ResponseType.SUCCESS, ResponseType.FINISH]:
-                return EngineOutput(status, token_ids, len(token_ids))
+                return EngineOutput(status,
+                                    token_ids,
+                                    len(token_ids),
+                                    req_id=req_id)
             token_ids = tmp_ids
 
-        return EngineOutput(0, token_ids, len(token_ids))
+        return EngineOutput(0, token_ids, len(token_ids), req_id=req_id)
 
     async def async_end(self, session_id: int):
         """End the given session."""
@@ -331,6 +358,18 @@ class EngineInstance:
     def cancel(self, session_id: int):
         """Stop current streaming inference."""
         return cancel(self.req_sender, session_id)
+
+    def end_req(self, session_id: int, req_id: int):
+        """end request."""
+        self.req_sender.send_async(
+            RequestType.END_REQUEST,
+            dict(session_id=session_id, req_id=req_id, response=False))
+
+    async def async_end_req(self, session_id: int, req_id: int):
+        """end request."""
+        await self.req_sender.async_send_async(
+            RequestType.END_REQUEST,
+            dict(session_id=session_id, req_id=req_id, response=False))
 
     def decode(self,
                input_ids,

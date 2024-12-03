@@ -200,15 +200,14 @@ class SchedulerSession:
         self.sequences: SeqMap = dict()
         self.seq_manager = seq_manager
 
-    def add_sequence(
-            self,
-            token_ids: Tensor,
-            sampling_param: SamplingParam = None,
-            adapter_name: str = None,
-            return_logits: bool = False,
-            multimodals: MultiModalInputs = None,
-            input_embeddings: List[InputEmbeddings] = None
-    ) -> 'SchedulerSequence':
+    def add_sequence(self,
+                     token_ids: Tensor,
+                     sampling_param: SamplingParam = None,
+                     adapter_name: str = None,
+                     return_logits: bool = False,
+                     multimodals: MultiModalInputs = None,
+                     input_embeddings: List[InputEmbeddings] = None,
+                     prefix_req_id: int = None) -> 'SchedulerSequence':
         """Add a new message."""
         if isinstance(token_ids, Tensor):
             token_ids = token_ids.numpy()
@@ -230,6 +229,7 @@ class SchedulerSession:
             history_embeddings=HistoryEmbeddings(input_embeddings),
             history_multimodals=HistoryMultiModals(multimodals),
             return_logits=return_logits,
+            prefix_req_id=prefix_req_id,
         )
         self.sequences[seq.seq_id] = seq
         if self.seq_manager is not None:
@@ -435,6 +435,7 @@ class SchedulerSequence:
         default_factory=LogicalTokenBlocks)
     sender_id: int = -1
     req_id: int = -1
+    prefix_req_id: int = None
     adapter_name: str = None
     arrive_time: float = 0.0
     meta: Any = None

@@ -4,11 +4,12 @@ import inspect
 import os.path as osp
 import re
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import torch
 from transformers.configuration_utils import PretrainedConfig
 
+from lmdeploy.pytorch.model_inputs import StepContextManager
 from lmdeploy.utils import get_logger
 
 from ..config import ModelConfig
@@ -180,14 +181,22 @@ def _get_model_class(config, module_map):
 
 def build_model_from_hf_config(model_config: PretrainedConfig,
                                dtype: torch.dtype = None,
-                               device: torch.device = None):
+                               device: torch.device = None,
+                               ctx_mgr: StepContextManager = None,
+                               sub_model_paths: List[str] = None):
     """build model from hf config."""
-    from lmdeploy.pytorch.model_inputs import StepContextManager
-    ctx_mgr = StepContextManager()
+    if ctx_mgr is None:
+        ctx_mgr = StepContextManager()
+        ctx_mgr.sub_model_paths = sub_model_paths
     module_map = _get_module_map()
     if device is None:
         device = torch.device('cuda')
     model_cls = _get_model_class(model_config, module_map)
+    if model_cls != 'InternLM2ForCausalLM':
+        logger.warning(
+            'This branch is designed to support Internlm2-XComposer3'
+            'Please switch to main branch if you want to deploy other '
+            'models.')
     model = model_cls(model_config, ctx_mgr, dtype=dtype, device=device)
     return model.eval()
 
@@ -197,7 +206,11 @@ def build_patched_model(config: ModelConfig, device: torch.device = None):
     """build patched model."""
     model_config = config.hf_config
     dtype = config.dtype
-    return build_model_from_hf_config(model_config, dtype=dtype, device=device)
+    sub_model_paths = config.sub_model_paths
+    return build_model_from_hf_config(model_config,
+                                      dtype=dtype,
+                                      device=device,
+                                      sub_model_paths=sub_model_paths)
 
 
 @torch.inference_mode()

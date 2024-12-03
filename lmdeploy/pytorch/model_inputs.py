@@ -331,6 +331,7 @@ class StepContextManager:
 
     def __init__(self):
         self._current_ctx = None
+        self.sub_model_paths = None
 
     @staticmethod
     def build_context(

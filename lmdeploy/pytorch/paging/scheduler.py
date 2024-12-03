@@ -154,6 +154,10 @@ class Scheduler:
         while len(waiting) > 0 and len(running) < max_batches:
             seq = waiting.pop(0)
 
+            # we don't want to batch vl/first prefill with other prefill
+            if len(running) > 0 and seq.history_len == 0:
+                break
+
             if (len(running) > 0 and token_count + seq.num_token_ids >
                     self.cache_config.max_prefill_token_num):
                 break
@@ -166,6 +170,10 @@ class Scheduler:
             # allocate session memory
             self.block_manager.allocate(seq)
             _to_running(seq)
+
+            # there should be only one vl/first prefill
+            if seq.history_len == 0:
+                break
 
         return running, swap_in_map, swap_out_map, copy_map
 
@@ -245,6 +253,20 @@ class Scheduler:
             session_id (int): The session id.
         """
         self._set_session_status(session_id, MessageStatus.STOPPED)
+
+    def remove_seq_by_req_id(self, session_id: int, req_id: int):
+        """remove sequence by request id."""
+        session = self.sessions.get('session_id')
+
+        seq = None
+        for seq in session.sequences.values():
+            if seq.req_id == req_id:
+                break
+
+        if seq is None or seq.req_id == req_id:
+            return
+
+        self._remove_sequence(seq)
 
     def _remove_sequence(self, seq: SchedulerSequence):
         """Remove sequence(unsafe)

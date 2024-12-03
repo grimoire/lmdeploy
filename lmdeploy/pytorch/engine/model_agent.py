@@ -254,8 +254,8 @@ class BaseModelAgent(AutoModelAgent):
         patched_model = build_patched_model(self.model_config, device=device)
         logger.info('loading weights.')
         load_model_weights(patched_model, model_path, device=device)
-        logger.info('loading adapters.')
         if adapters is not None:
+            logger.info('loading adapters.')
             add_adapters(patched_model,
                          adapters,
                          dtype=self.model_config.dtype,
@@ -766,7 +766,8 @@ def build_model_agent(model_path: str,
                       adapters: Dict[str, str] = None,
                       tp: int = 1,
                       dtype: str = 'auto',
-                      custom_module_map: str = None):
+                      custom_module_map: str = None,
+                      sub_model_paths: List[str] = None):
     """create model agent.
 
     Args:
@@ -782,6 +783,7 @@ def build_model_agent(model_path: str,
     model_config = ModelConfig.from_pretrained(
         model_path, trust_remote_code=trust_remote_code, dtype=dtype)
     model_config.custom_module_map = custom_module_map
+    model_config.sub_model_paths = sub_model_paths
     if tp == 1:
         model_agent = BaseModelAgent(model_path,
                                      model_config=model_config,

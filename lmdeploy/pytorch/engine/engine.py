@@ -88,6 +88,7 @@ class Engine:
     def __init__(self,
                  model_path: str,
                  engine_config: PytorchEngineConfig = None,
+                 sub_model_paths: List[str] = None,
                  trust_remote_code: bool = True) -> None:
         if engine_config is None:
             engine_config = PytorchEngineConfig()
@@ -134,6 +135,14 @@ class Engine:
             model_path = get_model(model_path, engine_config.download_dir,
                                    engine_config.revision)
         self.model_path = model_path
+        if sub_model_paths is not None:
+            new_sub_model_paths = []
+            for sub_path in sub_model_paths:
+                if not os.path.exists(sub_path):
+                    sub_path = get_model(sub_path, engine_config.download_dir,
+                                         engine_config.revision)
+                new_sub_model_paths.append(sub_path)
+            sub_model_paths = new_sub_model_paths
 
         if adapters is not None and len(adapters) > 0:
             adapters = self._download_adapters(adapters, engine_config)
@@ -152,7 +161,8 @@ class Engine:
                 adapters=adapters,
                 tp=self.tp,
                 dtype=engine_config.dtype,
-                custom_module_map=engine_config.custom_module_map)
+                custom_module_map=engine_config.custom_module_map,
+                sub_model_paths=sub_model_paths)
 
         self.input_processor = self.model_agent.get_input_processor()
 
@@ -175,6 +185,7 @@ class Engine:
     def from_pretrained(cls,
                         pretrained_model_name_or_path: str,
                         engine_config: PytorchEngineConfig = None,
+                        sub_model_paths: List[str] = None,
                         trust_remote_code: bool = True,
                         **kwargs):
         """lmdeploy python inference engine.
@@ -197,6 +208,7 @@ class Engine:
             logger.debug(f'Get unexpected kwargs: {kwargs}')
         return cls(model_path=pretrained_model_name_or_path,
                    engine_config=engine_config,
+                   sub_model_paths=sub_model_paths,
                    trust_remote_code=trust_remote_code)
 
     @property
@@ -236,6 +248,7 @@ class Engine:
     def _bind_request_manager(self):
         """bind request manager."""
         req_manager = RequestManager(self.engine_config.thread_safe)
+        req_manager.bind_func(RequestType.END_REQUEST, self._on_end_request)
         req_manager.bind_func(RequestType.ADD_SESSION, self._on_add_session)
         req_manager.bind_func(RequestType.STOP_SESSION, self._on_stop_session)
         req_manager.bind_func(RequestType.END_SESSION, self._on_end_session)
@@ -259,6 +272,21 @@ class Engine:
                      req_id=req_id,
                      data=data,
                      err_msg=err_msg))
+
+    def _on_end_request(self, reqs: Request, **kwargs):
+        """on end request callback."""
+        for req in reqs:
+            session_id = req.data['session_id']
+            req_id = req.data['req_id']
+            resp = req.data.get('response', True)
+            if session_id not in self.scheduler.sessions:
+                resp_type = ResponseType.SESSION_NOT_EXIST
+            else:
+                self.scheduler.remove_seq_by_req_id(req_id)
+                resp_type = ResponseType.SUCCESS
+
+            if resp:
+                self._response(resp_type, req.sender_id, req.req_id)
 
     def _on_add_session(self, reqs: Request, **kwargs):
         """on add session callback."""

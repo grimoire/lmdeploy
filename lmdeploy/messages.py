@@ -358,6 +358,7 @@ class EngineOutput:
     token_ids: List[int]
     num_token: int
     logprobs: List[Dict[int, float]] = None
+    req_id: int = None
 
 
 @dataclass

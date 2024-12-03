@@ -181,4 +181,10 @@ MODULE_MAP.update({
     f'{LMDEPLOY_PYTORCH_MODEL_PATH}.mllama.MllamaForConditionalGeneration',
 })
 
+# internlm2-xcomposer3
+MODULE_MAP.update({
+    'InternLM2ForCausalLM':
+    f'{LMDEPLOY_PYTORCH_MODEL_PATH}.internlm2_xcomposer3.InternLM2ForCausalLM'
+})
+
 CUSTOM_MODULE_MAP = dict()
