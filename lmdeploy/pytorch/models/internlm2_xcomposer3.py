@@ -743,8 +743,6 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
             q_seqlen_full=q_seqlen_full,
             inputs_embeds=inputs_embeds,
         )
-        print(ret)
-        exit()
         return ret
 
     def get_logits(self, hidden_states: torch.Tensor):
