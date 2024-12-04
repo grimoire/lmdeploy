@@ -250,7 +250,6 @@ class Engine:
     def _bind_request_manager(self):
         """bind request manager."""
         req_manager = RequestManager(self.engine_config.thread_safe)
-        req_manager.bind_func(RequestType.END_REQUEST, self._on_end_request)
         req_manager.bind_func(RequestType.ADD_SESSION, self._on_add_session)
         req_manager.bind_func(RequestType.STOP_SESSION, self._on_stop_session)
         req_manager.bind_func(RequestType.END_SESSION, self._on_end_session)
@@ -274,21 +273,6 @@ class Engine:
                      req_id=req_id,
                      data=data,
                      err_msg=err_msg))
-
-    def _on_end_request(self, reqs: Request, **kwargs):
-        """on end request callback."""
-        for req in reqs:
-            session_id = req.data['session_id']
-            req_id = req.data['req_id']
-            resp = req.data.get('response', True)
-            if session_id not in self.scheduler.sessions:
-                resp_type = ResponseType.SESSION_NOT_EXIST
-            else:
-                self.scheduler.remove_seq_by_req_id(req_id)
-                resp_type = ResponseType.SUCCESS
-
-            if resp:
-                self._response(resp_type, req.sender_id, req.req_id)
 
     def _get_max_session_len(self):
         """get max session len."""
@@ -392,6 +376,8 @@ class Engine:
                     return_logits=req.data.get('return_logits', False),
                     multimodals=req.data.get('input_multimodals'),
                     input_embeddings=req.data.get('input_embeddings'),
+                    prefix_session_id=req.data.get('prefix_session_id'),
+                    evictable=req.data.get('evictable', True),
                 )
                 msg = next(iter(sess.sequences.values()))
                 __update_bad_words(msg)
@@ -615,7 +601,7 @@ class Engine:
     @logging_timer('ModelForward', logger)
     async def _async_model_forward(self, inputs: ModelInputs,
                                    swap_in_map: Dict, swap_out_map: Dict,
-                                   return_logits: bool):
+                                   copy_map: Dict, return_logits: bool):
         """model forward."""
         max_prefill_token_num = self.cache_config.max_prefill_token_num
         swap_done = False
@@ -658,14 +644,20 @@ class Engine:
 
         async def __forward(inputs):
             """forward."""
-            nonlocal swap_done, swap_in_map, swap_out_map
+            nonlocal swap_done, swap_in_map, swap_out_map, copy_map
             if swap_done:
                 return await self.model_agent.async_forward(
-                    inputs, swap_in_map=dict(), swap_out_map=dict())
+                    inputs,
+                    swap_in_map=dict(),
+                    swap_out_map=dict(),
+                    copy_map=dict())
             else:
                 swap_done = True
                 return await self.model_agent.async_forward(
-                    inputs, swap_in_map=swap_in_map, swap_out_map=swap_out_map)
+                    inputs,
+                    swap_in_map=swap_in_map,
+                    swap_out_map=swap_out_map,
+                    copy_map=copy_map)
 
         async def __long_context_single_forward(inputs):
             """one large sequence."""
@@ -768,8 +760,8 @@ class Engine:
 
     async def _async_step_background(
             self, inputs: ModelInputs, swap_in_map: Dict, swap_out_map: Dict,
-            all_ids: torch.Tensor, guided_input_ids: torch.Tensor,
-            sampling_inputs: SamplingInputs,
+            copy_map: Dict, all_ids: torch.Tensor,
+            guided_input_ids: torch.Tensor, sampling_inputs: SamplingInputs,
             num_appendable_ids: torch.LongTensor,
             num_ignore_eos: torch.LongTensor, loop_count: int,
             return_logits: bool, output_que: asyncio.Queue):
@@ -810,6 +802,7 @@ class Engine:
                 inputs,
                 swap_in_map=swap_in_map,
                 swap_out_map=swap_out_map,
+                copy_map=copy_map,
                 return_logits=return_logits)
             logits = output['logits']
             logits = logits[0]  # [bs, seq, prob] -> [seq, prob]
@@ -852,10 +845,20 @@ class Engine:
 
             for req in reqs:
                 req_data = req.data
+                input_ids = req_data['token_ids']
+
+                if req_data.get('prefix_session_id') is not None:
+                    # get session
+                    prefix_seq = self.scheduler.get_prefix_seq(
+                        req_data['prefix_session_id'])
+                    prefix_len = prefix_seq.num_all_tokens()
+                    input_ids = [0] * prefix_len + input_ids
+                    req_data['token_ids'] = input_ids
+
                 if req_data.get('input_multimodals', None) is None:
                     continue
-                input_ids = req_data['token_ids']
                 input_multimodals = req_data['input_multimodals']
+
                 if len(input_multimodals) == 0:
                     req_data['input_multimodals'] = None
                     continue
@@ -938,6 +941,7 @@ class Engine:
                 running = scheduler_output.running
                 swap_in_map = scheduler_output.swap_in_map
                 swap_out_map = scheduler_output.swap_out_map
+                copy_map = scheduler_output.copy_map
                 prefill_interval = self.scheduler_config.prefill_interval
                 loop_count = 1 if is_prefill else (prefill_interval - 1)
                 assert len(running) > 0
@@ -959,6 +963,7 @@ class Engine:
                     inputs=inputs,
                     swap_in_map=swap_in_map,
                     swap_out_map=swap_out_map,
+                    copy_map=copy_map,
                     all_ids=all_ids,
                     guided_input_ids=guided_input_ids,
                     sampling_inputs=sampling_inputs,

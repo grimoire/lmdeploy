@@ -23,6 +23,8 @@ class RecomputeEvictionHelper(BaseEvictionHelper):
         success = False
         while len(evictable_seqs) > 0:
             evict_seq = evictable_seqs.pop(0)
+            if not evict_seq.evictable:
+                continue
 
             block_manager.free(evict_seq)
             num_req = (num_required_blocks -

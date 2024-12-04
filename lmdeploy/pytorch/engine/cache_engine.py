@@ -316,3 +316,19 @@ class CacheEngine:
 
         total = num_layers * (mem_key_block + mem_value_block)
         return total
+
+    def copy_caches(self, copy_map: Dict[int, int]):
+        """copy blocks."""
+        if len(copy_map) == 0:
+            return
+
+        from_ids = list(copy_map.keys())
+        to_ids = list(copy_map.values())
+
+        k_caches, v_caches = self.full_gpu_cache
+        device = k_caches.device
+        from_ids = torch.tensor(from_ids, device=device)
+        to_ids = torch.tensor(to_ids, device=device)
+
+        k_caches.index_copy_(1, to_ids, k_caches[:, from_ids])
+        v_caches.index_copy_(1, to_ids, v_caches[:, from_ids])

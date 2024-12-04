@@ -136,11 +136,13 @@ class InternLM2Attention(nn.Module):
         query_states: torch.Tensor,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_pos_emb: Tuple[torch.FloatTensor, torch.FloatTensor],
         mem_idx: torch.Tensor,
         attn_seqlen: torch.Tensor,
         attn_start_loc: torch.Tensor,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        beacon_rotary_pos_emb: Tuple[torch.FloatTensor,
+                                     torch.FloatTensor] = None,
         attn_metadata: Any = None,
     ):
         """compress attn."""
@@ -157,6 +159,9 @@ class InternLM2Attention(nn.Module):
         fill_key = key_states[mem_idx]
         fill_val = value_states[mem_idx]
 
+        cos, sin = beacon_rotary_pos_emb
+        fill_key, _ = self.apply_rotary_pos_emb(fill_key, fill_key, cos, sin)
+
         # fill kv seqlen
         k_caches, v_caches = past_key_value
         fill_start_loc = attn_metadata.q_start_loc
@@ -171,7 +176,7 @@ class InternLM2Attention(nn.Module):
             q_start_loc=fill_start_loc,
             q_seq_length=fill_seqlen,
             kv_seq_length=fill_kvlen,
-            max_q_seq_length=max_seqlen,
+            max_q_seq_length=fill_key.size(0),
             block_offsets=block_offsets,
         )
 
@@ -206,10 +211,14 @@ class InternLM2Attention(nn.Module):
         query_states: torch.Tensor,
         key_states: torch.Tensor,
         value_states: torch.Tensor,
-        rotary_pos_emb: torch.Tensor,
+        rotary_pos_emb: Tuple[torch.FloatTensor, torch.FloatTensor],
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
         attn_metadata: Any = None,
     ):
+        q_shape = query_states.shape
+        query_states = query_states.flatten(0, -3)
+        key_states = key_states.flatten(0, -3)
+        value_states = value_states.flatten(0, -3)
 
         # apply rotary embedding
         cos, sin = rotary_pos_emb
@@ -235,6 +244,7 @@ class InternLM2Attention(nn.Module):
             if len(past_key_value) == 2 else past_key_value[3],
             inplace=True,
         )
+        attn_output = attn_output.reshape(q_shape)
 
         return attn_output
 
@@ -248,6 +258,8 @@ class InternLM2Attention(nn.Module):
         attn_metadata: Any = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
+        beacon_rotary_pos_emb: Tuple[torch.FloatTensor,
+                                     torch.FloatTensor] = None,
     ):
         qkv_states = self.wqkv(hidden_states, mem_idx=mem_idx, im_idx=im_idx)
         qkv_states = qkv_states.unflatten(
@@ -267,6 +279,7 @@ class InternLM2Attention(nn.Module):
                 attn_seqlen=q_seqlen_full,
                 attn_start_loc=q_startloc_full,
                 past_key_value=past_key_value,
+                beacon_rotary_pos_emb=beacon_rotary_pos_emb,
                 attn_metadata=attn_metadata,
             )
         else:
@@ -377,6 +390,8 @@ class InternLM2DecoderLayer(nn.Module):
         attn_metadata: Any = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
+        beacon_rotary_pos_emb: Tuple[torch.FloatTensor,
+                                     torch.FloatTensor] = None,
     ):
 
         if residual is None:
@@ -396,6 +411,7 @@ class InternLM2DecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
             q_startloc_full=q_startloc_full,
             q_seqlen_full=q_seqlen_full,
+            beacon_rotary_pos_emb=beacon_rotary_pos_emb,
         )
 
         # Fully Connected
@@ -482,6 +498,7 @@ class InternLM2Model(nn.Module):
         attn_metadata: Any = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
+        beacon_pos_ids: torch.Tensor = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ):
         """Rewrite of forward."""
@@ -497,6 +514,12 @@ class InternLM2Model(nn.Module):
         cos, sin = cos[0], sin[0]
         rotary_pos_emb = (cos, sin)
 
+        beacon_rotary_pos_emb = None
+        if beacon_pos_ids is not None:
+            cos, sin = self.rotary_emb(hidden_states, beacon_pos_ids)
+            cos, sin = cos[0], sin[0]
+            beacon_rotary_pos_emb = (cos, sin)
+
         # decoding
         residual = None
         for idx, decoder_layer in enumerate(self.layers):
@@ -511,11 +534,11 @@ class InternLM2Model(nn.Module):
                 attn_metadata=attn_metadata,
                 q_startloc_full=q_startloc_full,
                 q_seqlen_full=q_seqlen_full,
+                beacon_rotary_pos_emb=beacon_rotary_pos_emb,
             )
 
         # norm
         hidden_states, _ = self.norm(hidden_states, residual)
-
         return hidden_states
 
     def get_input_embeddings(self):
@@ -702,6 +725,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
         image_mask: torch.Tensor = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
+        beacon_pos_ids: torch.Tensor = None,
         **kwargs,
     ):
         """forward."""
@@ -741,6 +765,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
             mem_idx=mem_idx,
             q_startloc_full=q_startloc_full,
             q_seqlen_full=q_seqlen_full,
+            beacon_pos_ids=beacon_pos_ids,
             inputs_embeds=inputs_embeds,
         )
         return ret
@@ -766,6 +791,11 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
         q_start_loc = context.q_start_loc
 
         # vision inputs
+        images = None
+        image_mask = None
+        q_seqlen_full = None
+        q_startloc_full = None
+        beacon_pos_ids = None
         if context.input_multimodals is not None:
             assert len(context.input_multimodals) == 1
             mm_img = context.input_multimodals[0].get('image', [])
@@ -777,6 +807,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
 
                 # make tensors
                 device = input_ids.device
+                beacon_pos_ids = position_ids
                 position_ids = [
                     torch.arange(0, seqlen, device=device)
                     for seqlen in q_seqlen_full
@@ -789,11 +820,6 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
                 new_input_ids = input_ids.new_zeros(1, image_mask.size(0))
                 new_input_ids[:, q_startloc_full] = valid_ids
                 input_ids = new_input_ids
-            else:
-                images = None
-                image_mask = None
-                q_seqlen_full = None
-                q_startloc_full = None
 
         # get inputs from context
         vision_embeddings = context.input_embeddings
@@ -805,7 +831,6 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
             inputs_embeds[:,
                           vision_embedding_indexing, :] = vision_embeddings.to(
                               inputs_embeds)
-
         return dict(
             input_ids=input_ids,
             position_ids=position_ids,
@@ -815,6 +840,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
             image_mask=image_mask,
             q_startloc_full=q_startloc_full,
             q_seqlen_full=q_seqlen_full,
+            beacon_pos_ids=beacon_pos_ids,
             inputs_embeds=inputs_embeds,
         )
 
@@ -885,7 +911,7 @@ class InternLM2XComposer3InputProcessor(BaseModelInputProcessor):
             return input_ids, input_multimodals
 
         input_imgs = []
-        pad_ids = [1]
+        pad_ids = []
         for input_mm in input_multimodals:
             pixel_values = input_mm['pixel_values'].to(self.dtype)
             offset = input_mm['offset']
@@ -898,6 +924,7 @@ class InternLM2XComposer3InputProcessor(BaseModelInputProcessor):
                                        end=offset + num_beacon,
                                        meta=dict(im_mask=im_mask))
             input_imgs.append(mm_data)
+        pad_ids[0] = 1
 
         result = PreprocessInputResult(
             input_ids=pad_ids,

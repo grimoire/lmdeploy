@@ -123,6 +123,11 @@ def cache_swapping(cache_engine: CacheEngine, swap_in_map: dict,
         cache_engine.events.wait()
 
 
+def cache_copy(cache_engine: CacheEngine, copy_map: Dict[int, int]):
+    """copy caches."""
+    cache_engine.copy_caches(copy_map)
+
+
 @torch.inference_mode()
 def model_forward(
     model: torch.nn.Module,
@@ -168,7 +173,7 @@ class AutoModelAgent:
         self.cache_config = cache_config
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap,
-                            swap_out_map: SwapMap):
+                            swap_out_map: SwapMap, copy_map: dict):
         """model forward.
 
         Args:
@@ -250,10 +255,11 @@ class BaseModelAgent(AutoModelAgent):
         return patched_model
 
     def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap,
-                      swap_out_map: SwapMap):
+                      swap_out_map: SwapMap, copy_map: dict):
         cache_swapping(self.cache_engine,
                        swap_in_map=swap_in_map,
                        swap_out_map=swap_out_map)
+        cache_copy(self.cache_engine, copy_map)
         output = model_forward(
             self.patched_model,
             inputs,
@@ -264,7 +270,7 @@ class BaseModelAgent(AutoModelAgent):
         return output
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap,
-                            swap_out_map: SwapMap):
+                            swap_out_map: SwapMap, copy_map: dict):
         """model forward.
 
         Args:
@@ -274,7 +280,8 @@ class BaseModelAgent(AutoModelAgent):
         """
         output = self._forward_impl(inputs,
                                     swap_in_map=swap_in_map,
-                                    swap_out_map=swap_out_map)
+                                    swap_out_map=swap_out_map,
+                                    copy_map=copy_map)
         await asyncio.sleep(0)
         while not self.stream.query():
             await asyncio.sleep(0)
@@ -377,7 +384,7 @@ def _broadcast_inputs(rank: int, inputs: Any, stream: torch.cuda.Stream):
     """get input tensor parallel."""
     # broadcast meta info
     if rank != 0:
-        inputs = [None, None, None]
+        inputs = [None, None, None, None]
 
     with torch.cuda.stream(stream):
         dist.broadcast_object_list(inputs)
@@ -417,13 +424,13 @@ def _tp_model_loop(
 
     while True:
         barrier.wait()
-        inputs, swap_in_map, swap_out_map = _broadcast_inputs(
+        inputs, swap_in_map, swap_out_map, copy_map = _broadcast_inputs(
             rank, None, stream)
 
         cache_swapping(cache_engine,
                        swap_in_map=swap_in_map,
                        swap_out_map=swap_out_map)
-
+        cache_copy(cache_engine, copy_map)
         model_forward(
             patched_model,
             inputs,
@@ -668,16 +675,18 @@ class TPModelAgent(AutoModelAgent):
         return model, cache_engine, cache_config
 
     def _forward_impl(self, inputs: ModelInputs, swap_in_map: SwapMap,
-                      swap_out_map: SwapMap):
+                      swap_out_map: SwapMap, copy_map: dict):
         """forward impl."""
         with get_dist_manager().context(self._dist_ctx):
             self.mp_bar.wait()
             rank = 0
-            _broadcast_inputs(rank, [inputs, swap_in_map, swap_out_map],
+            _broadcast_inputs(rank,
+                              [inputs, swap_in_map, swap_out_map, copy_map],
                               self.stream)
             cache_swapping(self.cache_engine,
                            swap_in_map=swap_in_map,
                            swap_out_map=swap_out_map)
+            cache_copy(self.cache_engine, copy_map)
             output = model_forward(
                 self.patched_model,
                 inputs,
@@ -688,7 +697,7 @@ class TPModelAgent(AutoModelAgent):
         return output
 
     async def async_forward(self, inputs: ModelInputs, swap_in_map: SwapMap,
-                            swap_out_map: SwapMap):
+                            swap_out_map: SwapMap, copy_map: dict):
         """model forward.
 
         Args:
@@ -698,7 +707,8 @@ class TPModelAgent(AutoModelAgent):
         """
         output = self._forward_impl(inputs,
                                     swap_in_map=swap_in_map,
-                                    swap_out_map=swap_out_map)
+                                    swap_out_map=swap_out_map,
+                                    copy_map=copy_map)
         await asyncio.sleep(0)
         while not self.stream.query():
             await asyncio.sleep(0)

@@ -40,7 +40,6 @@ class RequestType(enum.Enum):
     END_SESSION = enum.auto()
     STOP_ENGINE = enum.auto()
     RESUME_ENGINE = enum.auto()
-    END_REQUEST = enum.auto()
 
 
 @dataclass
@@ -359,9 +358,9 @@ class RequestManager:
         self.senders: Dict[int, RequestSender] = dict()
         self.callbacks: Dict[RequestType, Callable] = dict()
         self.request_priority: List[RequestType] = [
-            RequestType.END_REQUEST, RequestType.STOP_ENGINE,
-            RequestType.STOP_SESSION, RequestType.END_SESSION,
-            RequestType.ADD_SESSION, RequestType.ADD_MESSAGE
+            RequestType.STOP_ENGINE, RequestType.STOP_SESSION,
+            RequestType.END_SESSION, RequestType.ADD_SESSION,
+            RequestType.ADD_MESSAGE
         ]
         self.requests: asyncio.Queue = None
         self._loop_task: asyncio.Future = None
