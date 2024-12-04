@@ -72,6 +72,8 @@ class PLoRA(nn.Linear):
                                   dtype=dtype)
 
         self.weight.weight_loader = self.weight_loader
+        if self.bias is not None:
+            self.bias.weight_loader = self.weight_loader
         if self.colwise:
             self.Plora_B.weight.weight_loader = self.weight_loader
             self.MPlora_B.weight.weight_loader = self.weight_loader
