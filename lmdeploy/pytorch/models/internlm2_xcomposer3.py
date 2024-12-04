@@ -4,17 +4,20 @@ import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from transformers import AutoConfig
 from transformers.configuration_utils import PretrainedConfig
 
+from lmdeploy.pytorch.distributed import get_world_rank
 from lmdeploy.pytorch.engine.input_process import (BaseModelInputProcessor,
                                                    PreprocessInputResult)
 from lmdeploy.pytorch.model_inputs import StepContext, StepContextManager
 from lmdeploy.pytorch.multimodal.data_type import MultiModalTensor
 from lmdeploy.pytorch.nn import (ApplyRotaryEmb, Attention, RMSNorm, RopeType,
                                  build_rotary_embedding)
-from lmdeploy.pytorch.weight_loader.model_weight_loader import load_weight
+from lmdeploy.pytorch.weight_loader.model_weight_loader import (
+    default_weight_loader, load_weight)
 
 from .utils.cudagraph import CudaGraphMixin
 from .utils.model import DeployModelMixin
@@ -34,6 +37,12 @@ class PLoRA(nn.Linear):
         lora_alpha: int = 16,
         colwise: bool = True,
     ):
+        world_size, _ = get_world_rank()
+        if world_size > 1:
+            if colwise:
+                out_features //= world_size
+            else:
+                in_features //= world_size
         super().__init__(in_features, out_features, bias, device, dtype)
         self.colwise = colwise
         self.lora_r = lora_r
@@ -62,6 +71,48 @@ class PLoRA(nn.Linear):
                                   device=device,
                                   dtype=dtype)
 
+        self.weight.weight_loader = self.weight_loader
+        if self.colwise:
+            self.Plora_B.weight.weight_loader = self.weight_loader
+            self.MPlora_B.weight.weight_loader = self.weight_loader
+        else:
+            self.Plora_A.weight.weight_loader = self.weight_loader
+            self.MPlora_A.weight.weight_loader = self.weight_loader
+
+    def _weight_loader_tp_colwise(self, param: torch.nn.Parameter,
+                                  loaded_weight: torch.Tensor, rank: int,
+                                  world_size: int):
+        """weight loader for colwise linear."""
+        weight = loaded_weight.chunk(world_size, dim=0)[rank]
+        return default_weight_loader(param, weight)
+
+    def _weight_loader_tp_rowwise(self, param: torch.nn.Parameter,
+                                  loaded_weight: torch.Tensor, rank: int,
+                                  world_size: int):
+        """weight loader for rowwise linear."""
+        if loaded_weight.dim() == 2:
+            weight = loaded_weight.chunk(world_size, dim=1)[rank]
+            return default_weight_loader(param, weight)
+        else:
+            # bias
+            if rank != 0:
+                loaded_weight = torch.zeros_like(loaded_weight)
+            return default_weight_loader(param, loaded_weight)
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor):
+        """weight loader."""
+        world_size, rank = get_world_rank()
+        if world_size == 1:
+            return default_weight_loader(param, loaded_weight)
+
+        if self.colwise:
+            return self._weight_loader_tp_colwise(param, loaded_weight, rank,
+                                                  world_size)
+        else:
+            return self._weight_loader_tp_rowwise(param, loaded_weight, rank,
+                                                  world_size)
+
     def forward(self,
                 x,
                 mem_idx: torch.Tensor = None,
@@ -80,7 +131,13 @@ class PLoRA(nn.Linear):
             lora_x = self.MPlora_B(self.MPlora_A(mem_x))
             res.index_add_(0, mem_idx, lora_x, alpha=self.lora_scaling)
 
-        return res.reshape(B, N, -1)
+        ret = res.reshape(B, N, -1)
+        if not self.colwise:
+            world_size, _ = get_world_rank()
+            if world_size > 1:
+                dist.all_reduce(ret)
+
+        return ret
 
 
 class InternLM2Attention(nn.Module):

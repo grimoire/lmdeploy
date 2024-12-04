@@ -317,6 +317,7 @@ class CacheEngine:
         total = num_layers * (mem_key_block + mem_value_block)
         return total
 
+    @torch.inference_mode()
     def copy_caches(self, copy_map: Dict[int, int]):
         """copy blocks."""
         if len(copy_map) == 0:
