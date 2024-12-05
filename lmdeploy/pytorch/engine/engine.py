@@ -376,7 +376,6 @@ class Engine:
                     return_logits=req.data.get('return_logits', False),
                     multimodals=req.data.get('input_multimodals'),
                     input_embeddings=req.data.get('input_embeddings'),
-                    prefix_session_id=req.data.get('prefix_session_id'),
                     evictable=req.data.get('evictable', True),
                 )
                 msg = next(iter(sess.sequences.values()))
@@ -742,10 +741,17 @@ class Engine:
             if not finish and len(token_ids) == 0:
                 continue
             session_id = msg.session_id
+            meta = None
+            if finish:
+                block_offsets = msg.logical_blocks.get_real_blocks()
+                block_offsets = torch.from_numpy(block_offsets)
+                meta = dict(block_offsets=block_offsets,
+                            seqlen=msg.num_all_tokens())
             out = InferOutput(
                 session_id=session_id,
                 sender_id=msg.sender_id,
                 req_id=msg.req_id,
+                meta=meta,
                 finish=finish,
                 token_ids=token_ids,
             )
@@ -845,18 +851,11 @@ class Engine:
 
             for req in reqs:
                 req_data = req.data
-                input_ids = req_data['token_ids']
-
-                if req_data.get('prefix_session_id') is not None:
-                    # get session
-                    prefix_seq = self.scheduler.get_prefix_seq(
-                        req_data['prefix_session_id'])
-                    prefix_len = prefix_seq.num_all_tokens()
-                    input_ids = [0] * prefix_len + input_ids
-                    req_data['token_ids'] = input_ids
 
                 if req_data.get('input_multimodals', None) is None:
                     continue
+
+                input_ids = req_data['token_ids']
                 input_multimodals = req_data['input_multimodals']
 
                 if len(input_multimodals) == 0:
@@ -1002,13 +1001,16 @@ class Engine:
 
         def __send_resp(out: InferOutput):
             """send response."""
-            resp_type = (ResponseType.FINISH
-                         if out.finish else ResponseType.SUCCESS)
+            resp_data = dict(token_ids=out.token_ids, logits=out.logits)
+            if out.finish:
+                resp_type = ResponseType.FINISH
+                resp_data['meta'] = out.meta
+            else:
+                resp_type = ResponseType.SUCCESS
             self._response(resp_type,
                            sender_id=out.sender_id,
                            req_id=out.req_id,
-                           data=dict(token_ids=out.token_ids,
-                                     logits=out.logits))
+                           data=resp_data)
 
         def __send_resps(step_outputs: Dict[int, InferOutput]):
             """send response callback."""

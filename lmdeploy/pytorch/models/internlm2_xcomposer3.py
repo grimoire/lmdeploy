@@ -200,8 +200,6 @@ class InternLM2Attention(nn.Module):
         attn_seqlen: torch.Tensor,
         attn_start_loc: torch.Tensor,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        beacon_rotary_pos_emb: Tuple[torch.FloatTensor,
-                                     torch.FloatTensor] = None,
         attn_metadata: Any = None,
     ):
         """compress attn."""
@@ -217,9 +215,6 @@ class InternLM2Attention(nn.Module):
         # slice beacon
         fill_key = key_states[mem_idx]
         fill_val = value_states[mem_idx]
-
-        cos, sin = beacon_rotary_pos_emb
-        fill_key, _ = self.apply_rotary_pos_emb(fill_key, fill_key, cos, sin)
 
         # fill kv seqlen
         k_caches, v_caches = past_key_value
@@ -272,12 +267,32 @@ class InternLM2Attention(nn.Module):
         value_states: torch.Tensor,
         rotary_pos_emb: Tuple[torch.FloatTensor, torch.FloatTensor],
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        beacon_meta: Dict[str, Any] = None,
         attn_metadata: Any = None,
     ):
         q_shape = query_states.shape
         query_states = query_states.flatten(0, -3)
         key_states = key_states.flatten(0, -3)
         value_states = value_states.flatten(0, -3)
+
+        k_cache, v_cache = past_key_value
+
+        if beacon_meta is not None:
+            from lmdeploy.pytorch.kernels.cuda import flatten_kv_cache
+            b_key, b_val = flatten_kv_cache(
+                k_cache,
+                v_cache,
+                seqlens=beacon_meta['seqlens'],
+                block_offsets=beacon_meta['block_offsets'],
+                start_loc=beacon_meta['start_loc'],
+                out_size=beacon_meta['out_size'],
+            )
+            b_key = b_key.transpose(0, 1)
+            b_val = b_val.transpose(0, 1)
+
+            mask = beacon_meta['mask'][:, None, None]
+            key_states.masked_scatter_(mask, b_key)
+            value_states.masked_scatter_(mask, b_val)
 
         # apply rotary embedding
         cos, sin = rotary_pos_emb
@@ -294,8 +309,8 @@ class InternLM2Attention(nn.Module):
             query_states,
             key_states,
             value_states,
-            past_key_value[0],
-            past_key_value[1],
+            k_cache,
+            v_cache,
             attn_metadata,
             k_scales_zeros=None
             if len(past_key_value) == 2 else past_key_value[2],
@@ -317,8 +332,7 @@ class InternLM2Attention(nn.Module):
         attn_metadata: Any = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
-        beacon_rotary_pos_emb: Tuple[torch.FloatTensor,
-                                     torch.FloatTensor] = None,
+        beacon_meta: Dict[str, Any] = None,
     ):
         qkv_states = self.wqkv(hidden_states, mem_idx=mem_idx, im_idx=im_idx)
         qkv_states = qkv_states.unflatten(
@@ -338,7 +352,6 @@ class InternLM2Attention(nn.Module):
                 attn_seqlen=q_seqlen_full,
                 attn_start_loc=q_startloc_full,
                 past_key_value=past_key_value,
-                beacon_rotary_pos_emb=beacon_rotary_pos_emb,
                 attn_metadata=attn_metadata,
             )
         else:
@@ -348,6 +361,7 @@ class InternLM2Attention(nn.Module):
                 value_states=value_states,
                 rotary_pos_emb=rotary_pos_emb,
                 past_key_value=past_key_value,
+                beacon_meta=beacon_meta,
                 attn_metadata=attn_metadata,
             )
 
@@ -449,8 +463,7 @@ class InternLM2DecoderLayer(nn.Module):
         attn_metadata: Any = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
-        beacon_rotary_pos_emb: Tuple[torch.FloatTensor,
-                                     torch.FloatTensor] = None,
+        beacon_meta: Dict[str, Any] = None,
     ):
 
         if residual is None:
@@ -470,7 +483,7 @@ class InternLM2DecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
             q_startloc_full=q_startloc_full,
             q_seqlen_full=q_seqlen_full,
-            beacon_rotary_pos_emb=beacon_rotary_pos_emb,
+            beacon_meta=beacon_meta,
         )
 
         # Fully Connected
@@ -557,7 +570,7 @@ class InternLM2Model(nn.Module):
         attn_metadata: Any = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
-        beacon_pos_ids: torch.Tensor = None,
+        beacon_meta: Dict[str, Any] = None,
         inputs_embeds: Optional[torch.FloatTensor] = None,
     ):
         """Rewrite of forward."""
@@ -573,12 +586,6 @@ class InternLM2Model(nn.Module):
         cos, sin = cos[0], sin[0]
         rotary_pos_emb = (cos, sin)
 
-        beacon_rotary_pos_emb = None
-        if beacon_pos_ids is not None:
-            cos, sin = self.rotary_emb(hidden_states, beacon_pos_ids)
-            cos, sin = cos[0], sin[0]
-            beacon_rotary_pos_emb = (cos, sin)
-
         # decoding
         residual = None
         for idx, decoder_layer in enumerate(self.layers):
@@ -593,7 +600,7 @@ class InternLM2Model(nn.Module):
                 attn_metadata=attn_metadata,
                 q_startloc_full=q_startloc_full,
                 q_seqlen_full=q_seqlen_full,
-                beacon_rotary_pos_emb=beacon_rotary_pos_emb,
+                beacon_meta=beacon_meta,
             )
 
         # norm
@@ -784,7 +791,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
         image_mask: torch.Tensor = None,
         q_startloc_full: torch.Tensor = None,
         q_seqlen_full: torch.Tensor = None,
-        beacon_pos_ids: torch.Tensor = None,
+        beacon_meta: Dict[str, Any] = None,
         **kwargs,
     ):
         """forward."""
@@ -824,7 +831,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
             mem_idx=mem_idx,
             q_startloc_full=q_startloc_full,
             q_seqlen_full=q_seqlen_full,
-            beacon_pos_ids=beacon_pos_ids,
+            beacon_meta=beacon_meta,
             inputs_embeds=inputs_embeds,
         )
         return ret
@@ -854,19 +861,24 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
         image_mask = None
         q_seqlen_full = None
         q_startloc_full = None
-        beacon_pos_ids = None
+        beacon_meta = None
         if context.input_multimodals is not None:
-            assert len(context.input_multimodals) == 1
             mm_img = context.input_multimodals[0].get('image', [])
+            mm_boffs = [
+                mms.get('block_offsets', [])
+                for mms in context.input_multimodals
+            ]
+            mm_boffs = [off for offs in mm_boffs for off in offs]
+
             # flatten batch
             if len(mm_img) > 0:
+                assert len(mm_img) == 1
                 images = [data.data for data in mm_img]
                 image_mask = [data.meta['im_mask'] for data in mm_img]
                 q_seqlen_full = [mask.size(0) for mask in image_mask]
 
                 # make tensors
                 device = input_ids.device
-                beacon_pos_ids = position_ids
                 position_ids = [
                     torch.arange(0, seqlen, device=device)
                     for seqlen in q_seqlen_full
@@ -879,6 +891,24 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
                 new_input_ids = input_ids.new_zeros(1, image_mask.size(0))
                 new_input_ids[:, q_startloc_full] = valid_ids
                 input_ids = new_input_ids
+
+            if len(mm_boffs) > 0:
+                from torch.nn.utils.rnn import pad_sequence
+                block_offsets = [data.data for data in mm_boffs]
+                beacon_lens = [data.end - data.start for data in mm_boffs]
+                beacon_size = sum(beacon_lens)
+                block_offsets = pad_sequence(block_offsets, batch_first=True)
+                beacon_lens = input_ids.new_tensor(beacon_lens)
+                beacon_startloc = beacon_lens.cumsum(0) - beacon_lens
+                beacon_mask = (input_ids == 0).flatten()
+
+                beacon_meta = dict(
+                    block_offsets=block_offsets,
+                    seqlens=beacon_lens,
+                    start_loc=beacon_startloc,
+                    out_size=beacon_size,
+                    mask=beacon_mask,
+                )
 
         # get inputs from context
         vision_embeddings = context.input_embeddings
@@ -899,7 +929,7 @@ class InternLM2ForCausalLM(nn.Module, CudaGraphMixin, DeployModelMixin):
             image_mask=image_mask,
             q_startloc_full=q_startloc_full,
             q_seqlen_full=q_seqlen_full,
-            beacon_pos_ids=beacon_pos_ids,
+            beacon_meta=beacon_meta,
             inputs_embeds=inputs_embeds,
         )
 
@@ -961,6 +991,34 @@ class InternLM2XComposer3InputProcessor(BaseModelInputProcessor):
 
         return im_mask
 
+    def _process_img(self, pad_ids: List, input_mm: Dict):
+        pixel_values = input_mm['pixel_values'].to(self.dtype)
+        offset = input_mm['offset']
+        im_mask = self._get_im_mask(pixel_values)
+        num_beacon = torch.count_nonzero(im_mask == 2)
+        pad_ids += [0] * num_beacon
+
+        mm_data = MultiModalTensor(data=pixel_values,
+                                   start=offset,
+                                   end=offset + num_beacon,
+                                   meta=dict(im_mask=im_mask))
+        return pad_ids, mm_data
+
+    def _process_boff(self, cum_pad: int, input_ids: List[str],
+                      input_mm: Dict[str, Any]):
+        block_offsets = input_mm['block_offsets']
+        seqlen = input_mm['seqlen']
+        offset = input_mm['offset'] + cum_pad
+        num_pad = seqlen - 1
+        input_ids = input_ids[:offset] + [0] * num_pad + input_ids[offset:]
+        cum_pad += num_pad
+
+        mm_data = MultiModalTensor(data=block_offsets,
+                                   start=offset,
+                                   end=offset + num_pad)
+
+        return cum_pad, input_ids, mm_data
+
     def preprocess_input(self,
                          input_ids: List[int],
                          input_multimodals: List[Dict[str, Any]] = None,
@@ -970,23 +1028,34 @@ class InternLM2XComposer3InputProcessor(BaseModelInputProcessor):
             return input_ids, input_multimodals
 
         input_imgs = []
+        input_boffs = []
         pad_ids = []
+        cum_pad = 0
         for input_mm in input_multimodals:
-            pixel_values = input_mm['pixel_values'].to(self.dtype)
-            offset = input_mm['offset']
-            im_mask = self._get_im_mask(pixel_values)
-            num_beacon = torch.count_nonzero(im_mask == 2)
-            pad_ids += [0] * num_beacon
+            if 'pixel_values' in input_mm:
+                pad_ids, mm_data = self._process_img(pad_ids, input_mm)
+                input_imgs.append(mm_data)
+            elif 'block_offsets' in input_mm:
+                cum_pad, input_ids, mm_data = self._process_boff(
+                    cum_pad, input_ids, input_mm)
+                input_boffs.append(mm_data)
 
-            mm_data = MultiModalTensor(data=pixel_values,
-                                       start=offset,
-                                       end=offset + num_beacon,
-                                       meta=dict(im_mask=im_mask))
-            input_imgs.append(mm_data)
-        pad_ids[0] = 1
+        has_img = len(input_imgs) > 0
+        has_boff = len(input_boffs) > 0
+
+        assert not (has_img and has_boff), (
+            'Do not allow both image and block_offset inputs.')
+
+        mms = dict()
+        if has_img:
+            mms['image'] = input_imgs
+            pad_ids[0] = 1
+            input_ids = pad_ids
+        if has_boff:
+            mms['block_offsets'] = input_boffs
 
         result = PreprocessInputResult(
-            input_ids=pad_ids,
-            input_multimodals=dict(image=input_imgs),
+            input_ids=input_ids,
+            input_multimodals=mms,
         )
         return result

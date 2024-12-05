@@ -154,36 +154,16 @@ class Scheduler:
         while len(waiting) > 0 and len(running) < max_batches:
             seq = waiting.pop(0)
 
-            mm = seq.get_input_multimodals()
+            mm = seq.get_input_multimodals().get('image', [])
             has_mm = len(mm) > 0
 
-            # only support vl no batch
+            # do not mix image and non-image inputs.
             if len(running) > 0 and has_mm:
                 break
 
             if (len(running) > 0 and token_count + seq.num_token_ids >
                     self.cache_config.max_prefill_token_num):
                 break
-
-            # match prefix
-            copy_block_id = -1
-            from_block = None
-            new_step = 0
-            if seq.prefix_session_id is not None:
-                # get prefix seq
-                prefix_seq = self.get_prefix_seq(
-                    prefix_session_id=seq.prefix_session_id)
-                blocks = prefix_seq.logical_blocks.get_real_blocks()
-
-                if seq.num_blocks < len(blocks):
-                    copy_block_id = len(blocks) - 1
-                    from_block = blocks[-1]
-                    new_step = prefix_seq.num_all_tokens()
-
-                if seq.num_blocks == 0:
-                    # add ref count and set
-                    self.block_manager.allocator.add_ref_count(blocks[:-1], 1)
-                    seq.logical_blocks.append(blocks[:-1])
 
             self.block_trie.match(seq)
             if not __evict_for_seq(seq, waiting):
@@ -192,15 +172,9 @@ class Scheduler:
             # allocate session memory
             self.block_manager.allocate(seq)
 
-            # copy last block
-            if copy_block_id >= 0:
-                to_block = seq.logical_blocks[copy_block_id]
-                copy_map[from_block] = to_block
-                seq.set_step(new_step)
-
             _to_running(seq)
 
-            # there should be only one vl/first prefill
+            # do not batch images
             if has_mm:
                 break
 
@@ -332,9 +306,3 @@ class Scheduler:
     def get_block_tables(self, seqs: SeqList):
         """get block table of the sequences."""
         return [self.block_manager.get_block_table(seq) for seq in seqs]
-
-    def get_prefix_seq(self, prefix_session_id: int):
-        sess = self.sessions[prefix_session_id]
-        prefix_seq: SchedulerSequence = next(iter(sess.sequences.values()))
-
-        return prefix_seq

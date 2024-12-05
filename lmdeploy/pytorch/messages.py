@@ -207,7 +207,6 @@ class SchedulerSession:
                      return_logits: bool = False,
                      multimodals: MultiModalInputs = None,
                      input_embeddings: List[InputEmbeddings] = None,
-                     prefix_session_id: int = None,
                      evictable: bool = True) -> 'SchedulerSequence':
         """Add a new message."""
         if isinstance(token_ids, Tensor):
@@ -230,7 +229,6 @@ class SchedulerSession:
             history_embeddings=HistoryEmbeddings(input_embeddings),
             history_multimodals=HistoryMultiModals(multimodals),
             return_logits=return_logits,
-            prefix_session_id=prefix_session_id,
             evictable=evictable,
         )
         self.sequences[seq.seq_id] = seq
@@ -437,7 +435,6 @@ class SchedulerSequence:
         default_factory=LogicalTokenBlocks)
     sender_id: int = -1
     req_id: int = -1
-    prefix_session_id: int = None
     adapter_name: str = None
     arrive_time: float = 0.0
     meta: Any = None
