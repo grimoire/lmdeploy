@@ -172,7 +172,7 @@ class Engine:
         # create main thread
         self._start_loop()
         self._create_buffers()
-        self._output_stream = torch.cuda.Stream()
+        self._sub_stream = torch.cuda.Stream()
 
     @classmethod
     def from_pretrained(cls,
@@ -680,6 +680,7 @@ class Engine:
         return ret
 
     async def _make_infer_outputs(self, next_token_ids: torch.LongTensor,
+                                  running: List[SchedulerSequence],
                                   logits: torch.Tensor, stopped: torch.Tensor,
                                   model_metas: List[Dict[str, Any]],
                                   event: torch.cuda.Event):
@@ -694,29 +695,34 @@ class Engine:
                 return []
             return [token]
 
-        def __get_q_start_loc():
-            inputs = self._inputs
-            seq_length = inputs.seq_length
-            batch_size = len(seq_length)
-            if inputs.is_decoding:
+        def __get_seqlens():
+            """get seqlens."""
+            seqlens = [msg.num_token_ids for msg in running]
+            seqlens = torch.tensor(seqlens)
+            return seqlens
+
+        def __get_q_start_loc(seqlens: torch.Tensor):
+            batch_size = len(seqlens)
+            is_decoding = (seqlens == 1).all()
+            if is_decoding:
                 return torch.arange(0, batch_size)
             else:
-                return seq_length.cumsum(0) - seq_length
+                return seqlens.cumsum(0) - seqlens
 
         while not event.query():
             await asyncio.sleep(0.001)
-        with torch.cuda.stream(self._output_stream):
+        with torch.cuda.stream(self._sub_stream):
             next_token_ids = next_token_ids.cpu()
             stopped = stopped.cpu()
 
-        running = self._running
         is_run = [seq.status == MessageStatus.RUNNING for seq in running]
         stopped = stopped.tolist()
         self.update_running(running, next_token_ids, stopped, model_metas)
 
         # generate output
         next_token_ids = next_token_ids.tolist()
-        q_start_loc = __get_q_start_loc()
+        seqlens = __get_seqlens()
+        q_start_loc = __get_q_start_loc(seqlens)
         outputs: Dict[int, InferOutput] = dict()
         for idx, msg in enumerate(running):
             if not is_run[idx]:
@@ -737,9 +743,8 @@ class Engine:
             outputs[session_id] = out
 
             if msg.return_logits:
-                inputs = self._inputs
                 start = q_start_loc[idx]
-                seqlen = inputs.seq_length[idx]
+                seqlen = seqlens[idx]
                 outputs[session_id].logits = logits[start:start + seqlen]
         return outputs
 
@@ -749,7 +754,8 @@ class Engine:
             sampling_inputs: SamplingInputs,
             num_appendable_ids: torch.LongTensor,
             num_ignore_eos: torch.LongTensor, loop_count: int,
-            return_logits: bool, output_que: asyncio.Queue):
+            return_logits: bool, running: List[SchedulerSequence],
+            output_que: asyncio.Queue):
         """asyc forward task."""
 
         def __update_inputs(next_token_ids):
@@ -767,20 +773,10 @@ class Engine:
             if sampling_inputs.random_offsets is not None:
                 sampling_inputs.random_offsets += 1
 
+        is_decoding = inputs.is_decoding
         logger.debug('<ForwardTask>: '
                      f'batch_size={inputs.seq_length.size(0)} '
                      f'num_tokens={inputs.input_ids.size(-1)}')
-        if self.gpu_count == 1:
-            inputs = inputs.to_device('cuda')
-        is_decoding = inputs.is_decoding
-        if all_ids is not None:
-            all_ids = all_ids.cuda()
-        if guided_input_ids is not None:
-            guided_input_ids = guided_input_ids.cuda()
-        sampling_inputs = sampling_inputs.to_device('cuda')
-        num_appendable_ids = num_appendable_ids.cuda()
-        num_ignore_eos = num_ignore_eos.cuda()
-
         for idx in range(loop_count):
             # inference
             output = await self._async_model_forward(
@@ -807,16 +803,19 @@ class Engine:
             finish = finish or _check_finish(self.scheduler, idx)
             event = torch.cuda.Event()
             event.record()
-            output = (next_token_ids, logits, stopped, model_metas, event)
-            output_que.put_nowait((finish, output))
+            output = dict(next_token_ids=next_token_ids,
+                          running=running,
+                          logits=logits,
+                          stopped=stopped,
+                          model_metas=model_metas,
+                          event=event)
+            output_que.put_nowait((finish, is_decoding, output))
 
             inputs.model_metas = model_metas
 
             if finish:
                 break
-
-            # update for next loop
-            if is_decoding:
+            else:
                 swap_in_map = dict()
                 swap_out_map = dict()
                 __update_inputs(next_token_ids)
@@ -852,9 +851,27 @@ class Engine:
                 outque.put_nowait(reqs)
 
     @torch.inference_mode()
-    async def _async_loop_background(self, in_que: asyncio.Queue,
+    async def _async_loop_background(self, is_busy: asyncio.Event,
+                                     in_que: asyncio.Queue,
                                      out_que: asyncio.Queue):
         """async loop background."""
+
+        while True:
+            is_busy.clear()
+            forward_inputs = await in_que.get()
+            is_busy.set()
+            try:
+                await self._async_step_background(
+                    output_que=out_que,
+                    **forward_inputs,
+                )
+            except Exception as e:
+                out_que.put_nowait((True, e))
+            finally:
+                in_que.task_done()
+
+    def _schedule_and_make_input(self, prefill_only: bool = False):
+        """schedule and make input."""
 
         def __gather_all_ids(seqs: SeqList, sampling_inputs: SamplingInputs):
             """gather history."""
@@ -912,46 +929,69 @@ class Engine:
             """need logits."""
             return any(seq.return_logits for seq in seqs)
 
-        while True:
-            is_prefill, scheduler_output = await in_que.get()
-            try:
-                running = scheduler_output.running
-                swap_in_map = scheduler_output.swap_in_map
-                swap_out_map = scheduler_output.swap_out_map
-                prefill_interval = self.scheduler_config.prefill_interval
-                loop_count = 1 if is_prefill else (prefill_interval - 1)
-                assert len(running) > 0
+        if not self.scheduler.has_unfinished():
+            return
 
-                # create inputs
-                inputs = self.create_model_inputs(running, is_prefill)
-                sampling_inputs = SamplingInputs.from_sampling_params(running)
-                all_ids = __gather_all_ids(running, sampling_inputs)
-                guided_input_ids = __gather_guided_input_ids(
-                    running, sampling_inputs)
-                num_appendable_ids = __get_num_appendable_ids(running)
-                num_ignore_eos = __get_num_ignore_eos(running)
-                return_logits = __need_logits(running)
+        prefill_interval = self.scheduler_config.prefill_interval
+        is_prefill = self.scheduler.has_waiting()
+        if prefill_only and not is_prefill:
+            return None
 
-                self._running = running
-                self._inputs = inputs
+        schedule_output = self.scheduler.schedule(
+            is_prefill=is_prefill, prealloc_size=prefill_interval)
+        # schedule decoding if no valid prefill reqs.
 
-                await self._async_step_background(
-                    inputs=inputs,
-                    swap_in_map=swap_in_map,
-                    swap_out_map=swap_out_map,
-                    all_ids=all_ids,
-                    guided_input_ids=guided_input_ids,
-                    sampling_inputs=sampling_inputs,
-                    num_appendable_ids=num_appendable_ids,
-                    num_ignore_eos=num_ignore_eos,
-                    loop_count=loop_count,
-                    return_logits=return_logits,
-                    output_que=out_que,
-                )
-            except Exception as e:
-                out_que.put_nowait((True, e))
-            finally:
-                in_que.task_done()
+        if prefill_only and len(schedule_output.running) == 0:
+            return None
+
+        if is_prefill and len(schedule_output.running) == 0:
+            is_prefill = False
+            schedule_output = self.scheduler.schedule(
+                is_prefill=is_prefill, prealloc_size=prefill_interval + 1)
+
+        running = schedule_output.running
+        if len(running) == 0:
+            return None
+
+        swap_in_map = schedule_output.swap_in_map
+        swap_out_map = schedule_output.swap_out_map
+        loop_count = 1 if is_prefill else (prefill_interval - 1)
+        assert len(running) > 0
+
+        # create inputs
+        inputs = self.create_model_inputs(running, is_prefill)
+        sampling_inputs = SamplingInputs.from_sampling_params(running)
+        all_ids = __gather_all_ids(running, sampling_inputs)
+        guided_input_ids = __gather_guided_input_ids(running, sampling_inputs)
+        num_appendable_ids = __get_num_appendable_ids(running)
+        num_ignore_eos = __get_num_ignore_eos(running)
+        return_logits = __need_logits(running)
+
+        with torch.cuda.stream(self._sub_stream):
+            if self.gpu_count == 1:
+                inputs = inputs.to_device('cuda')
+            if all_ids is not None:
+                all_ids = all_ids.cuda()
+            if guided_input_ids is not None:
+                guided_input_ids = guided_input_ids.cuda()
+            sampling_inputs = sampling_inputs.to_device('cuda')
+            num_appendable_ids = num_appendable_ids.cuda()
+            num_ignore_eos = num_ignore_eos.cuda()
+
+        forward_inputs = dict(
+            inputs=inputs,
+            swap_in_map=swap_in_map,
+            swap_out_map=swap_out_map,
+            all_ids=all_ids,
+            guided_input_ids=guided_input_ids,
+            sampling_inputs=sampling_inputs,
+            num_appendable_ids=num_appendable_ids,
+            num_ignore_eos=num_ignore_eos,
+            loop_count=loop_count,
+            return_logits=return_logits,
+            running=running,
+        )
+        return forward_inputs
 
     @torch.inference_mode()
     async def _async_loop(self):
@@ -960,20 +1000,23 @@ class Engine:
         Each engine instance would communicate with the engine by queue.
         """
 
-        self._msg_preprocess_inque = asyncio.Queue()
-        self._msg_preprocess_outque = asyncio.Queue()
-
-        prefill_interval = self.scheduler_config.prefill_interval
+        # forward loop
+        is_busy = asyncio.Event()
         in_que = asyncio.Queue()
         out_que = asyncio.Queue()
         loop_background = asyncio.get_event_loop().create_task(
-            self._async_loop_background(in_que, out_que),
+            self._async_loop_background(is_busy, in_que, out_que),
             name='MainLoopBackground')
-        loop_background = asyncio.get_event_loop().create_task(
+        loop_background.add_done_callback(_raise_exception_on_finish)
+
+        # input preprocess loop
+        self._msg_preprocess_inque = asyncio.Queue()
+        self._msg_preprocess_outque = asyncio.Queue()
+        loop_msg_proc = asyncio.get_event_loop().create_task(
             self._async_loop_preprocess_message(self._msg_preprocess_inque,
                                                 self._msg_preprocess_outque),
             name='MainLoopPreprocessMessage')
-        loop_background.add_done_callback(_raise_exception_on_finish)
+        loop_msg_proc.add_done_callback(_raise_exception_on_finish)
 
         def __send_resp(out: InferOutput):
             """send response."""
@@ -990,46 +1033,39 @@ class Engine:
             for out in step_outputs.values():
                 __send_resp(out)
 
-        async def __step():
-            """step decoding."""
-            prefill = self.scheduler.has_waiting()
-            schedule_output = self.scheduler.schedule(
-                is_prefill=prefill, prealloc_size=prefill_interval)
-            # schedule decoding if no valid prefill reqs.
-            if prefill and len(schedule_output.running) == 0:
-                prefill = False
-                schedule_output = self.scheduler.schedule(
-                    is_prefill=prefill, prealloc_size=prefill_interval)
+        finish = True
 
-            in_que.put_nowait((prefill, schedule_output))
-            finish = False
-            while not finish:
-                if self.req_manager.has_requests():
-                    self.req_manager.step()
-                self._add_message(self._msg_preprocess_outque)
-                finish, out = await out_que.get()
-                try:
-                    if isinstance(out, Exception):
-                        raise out
-                    (next_token_ids, logits, stopped, model_metas, event) = out
-                    step_outputs = await self._make_infer_outputs(
-                        next_token_ids, logits, stopped, model_metas, event)
-                    __send_resps(step_outputs)
-                except Exception as e:
-                    raise e
-                finally:
-                    out_que.task_done()
+        async def __schedule(prefill_only):
+            nonlocal finish
+            forward_inputs = self._schedule_and_make_input(prefill_only)
+            if forward_inputs is not None:
+                finish = False
+                in_que.put_nowait(forward_inputs)
+                await asyncio.sleep(0)
 
         while True:
+
+            # process request
             if self.req_manager.has_requests():
                 self.req_manager.step()
             self._add_message(self._msg_preprocess_outque)
 
-            if not self.scheduler.has_unfinished():
-                await asyncio.sleep(0.01)
+            # schedule if engine is not working
+            if not is_busy.is_set() and finish:
+                if not self.scheduler.has_unfinished():
+                    await asyncio.sleep(0.01)
+                    continue
+                await __schedule(False)
+                # wait until busy
                 continue
 
-            await __step()
+            finish, is_decoding, forward_out = await out_que.get()
+            if finish:
+                prefill_only = not is_decoding
+                await __schedule(prefill_only)
+
+            step_outputs = await self._make_infer_outputs(**forward_out)
+            __send_resps(step_outputs)
 
     async def async_loop(self):
         device_manager = get_device_manager()
