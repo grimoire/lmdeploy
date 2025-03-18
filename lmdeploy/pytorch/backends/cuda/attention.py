@@ -109,6 +109,8 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
             fill_max_q_seqlen = key.numel() // (key.size(-1) * key.size(-2))
             fill_q_start_loc = fill_seqlens.cumsum(0) - fill_seqlens
 
+        is_mla = key.data_ptr() == value.data_ptr()
+
         # fill kv cache
         if key is not None and value is not None:
             self.fill_kv_cache(
@@ -146,6 +148,7 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
                     window_size=self.sliding_window,
                     sm_scale=self.scale,
                     logit_softcapping=self.logit_softcapping,
+                    is_mla=is_mla,
                 )
             else:
                 BLOCK_BS = k_cache.size(1)
@@ -177,6 +180,7 @@ class TritonAttentionImpl(AttentionImpl[TritonAttentionMetadata]):
                     sm_scale=self.scale,
                     logit_softcapping=self.logit_softcapping,
                     causal=self.causal,
+                    is_mla=is_mla,
                 )
         else:
             self.alibi_paged_attention_fwd(
@@ -333,6 +337,7 @@ class FlashMLAImpl(TritonAttentionImpl):
                 sm_scale=self.scale,
                 logit_softcapping=self.logit_softcapping,
                 causal=self.causal,
+                is_mla=True,
             )
         return attn_output
 

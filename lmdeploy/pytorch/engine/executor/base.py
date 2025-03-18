@@ -105,12 +105,6 @@ class ExecutorBase:
             if self.cache_config.block_size != 64:
                 raise ValueError('Please set block_size to 64 for flash_mla.')
             return
-        # TODO: support kernel with both large head dim and large block size.
-        if self.model_config.k_head_dim >= 512 and self.cache_config.block_size > 32:
-            self.cache_config.block_size = 32
-            logger.warning(
-                f'Update `block_size={self.cache_config.block_size}` for large `head_dim={self.model_config.k_head_dim}`.'  # noqa
-            )
 
     def update_configs(self):
         """update cache config."""

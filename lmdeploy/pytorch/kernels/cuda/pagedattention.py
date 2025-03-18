@@ -111,6 +111,7 @@ def _fwd_grouped_split_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_DMODEL1: tl.constexpr,
+    is_mla: tl.constexpr,
 ):
     """first step kernel of split k attention."""
     cur_batch = tl.program_id(2)
@@ -191,7 +192,10 @@ def _fwd_grouped_split_kernel(
         if BLOCK_DMODEL1 != 0:
             k1 = tl.load(k1_ptrs + b_offset * stride_kp)
 
-        v = tl.load(v_ptrs + b_offset * stride_vp)
+        if is_mla:
+            v = tl.trans(k)
+        else:
+            v = tl.load(v_ptrs + b_offset * stride_vp)
 
         qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
@@ -340,6 +344,7 @@ def _fwd_grouped_split_quant_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_DMODEL1: tl.constexpr,
+    is_mla: tl.constexpr,
 ):
     """first step kernel of split k attention.
 
@@ -460,7 +465,10 @@ def _fwd_grouped_split_quant_kernel(
         vz = tl.load(vsz_ptrs + b_offset * stride_vszp + 1)
 
         k = ((k - kz) * ks).to(q.dtype)
-        v = ((v - vz) * vs).to(q.dtype)
+        if is_mla:
+            v = tl.trans(k)
+        else:
+            v = ((v - vz) * vs).to(q.dtype)
         qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
         qk += tl.dot(q, k)
         if BLOCK_DMODEL1 != 0:
@@ -610,6 +618,7 @@ def paged_attention_fwd(
     window_size: int = None,
     sm_scale: float = None,
     logit_softcapping: float = None,
+    is_mla: bool = False,
     kv_layout: str = 'bshd',
 ):
     """Paged Attention forward.
@@ -738,6 +747,7 @@ def paged_attention_fwd(
                                               BLOCK_N=BLOCK,
                                               BLOCK_H=BLOCK_H,
                                               BLOCK_DMODEL1=BLOCK_DMODEL1,
+                                              is_mla=is_mla,
                                               **kernel_meta)
 
     else:
@@ -776,6 +786,7 @@ def paged_attention_fwd(
                                         BLOCK_N=BLOCK,
                                         BLOCK_H=BLOCK_H,
                                         BLOCK_DMODEL1=BLOCK_DMODEL1,
+                                        is_mla=is_mla,
                                         **kernel_meta)
 
     num_warps = 4

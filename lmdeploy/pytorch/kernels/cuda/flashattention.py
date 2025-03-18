@@ -59,7 +59,8 @@ def _load_kv(ptrs, causal_mask: tl.constexpr, boundary_check: tl.constexpr):
 @triton.jit
 def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs, loop_start, loop_end, sm_scale, history_mask,
                        kv_min_loc, causal_mask: tl.constexpr, window_size: tl.constexpr,
-                       logit_softcapping: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_DK1: tl.constexpr):
+                       logit_softcapping: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_DK1: tl.constexpr,
+                       is_mla: tl.constexpr):
     k_ptrs = tl.advance(k_ptrs, (0, loop_start))
     v_ptrs = tl.advance(v_ptrs, (loop_start, 0))
     if BLOCK_DK1:
@@ -122,7 +123,10 @@ def _prefill_fwd_inner(acc, l_i, m_i, q, k_ptrs, v_ptrs, q1, k1_ptrs, loop_start
         acc = acc * alpha[:, None]
 
         # update acc
-        v = _load_kv(v_ptrs, causal_mask, boundary_check=(0, ))
+        if is_mla:
+            v = tl.trans(k)
+        else:
+            v = _load_kv(v_ptrs, causal_mask, boundary_check=(0, ))
         p = p.to(v.dtype)
         acc += tl.dot(p, v)
         # update m_i and l_i
@@ -185,6 +189,7 @@ def _flash_prefill_fwd_kernel(
     BLOCK_DK: tl.constexpr,
     BLOCK_DK1: tl.constexpr,
     BLOCK_DV: tl.constexpr,
+    is_mla: tl.constexpr,
 ):
     """flash attention kernel."""
     start_m = tl.program_id(0)
@@ -284,7 +289,8 @@ def _flash_prefill_fwd_kernel(
                                        window_size=window_size,
                                        logit_softcapping=logit_softcapping,
                                        BLOCK_N=BLOCK_N,
-                                       BLOCK_DK1=BLOCK_DK1)
+                                       BLOCK_DK1=BLOCK_DK1,
+                                       is_mla=is_mla)
 
     loop_start = loop_end
     if causal:
@@ -308,7 +314,8 @@ def _flash_prefill_fwd_kernel(
                                        window_size=window_size,
                                        logit_softcapping=logit_softcapping,
                                        BLOCK_N=BLOCK_N,
-                                       BLOCK_DK1=BLOCK_DK1)
+                                       BLOCK_DK1=BLOCK_DK1,
+                                       is_mla=is_mla)
     # epilogue
     m_i += tl.math.log2(l_i)
     acc = acc / l_i[:, None]
@@ -338,6 +345,7 @@ def flash_attention_fwd(
     sm_scale: float = None,
     logit_softcapping: float = None,
     causal: bool = True,
+    is_mla: bool = False,
     kv_layout: str = 'hsd',
 ):
     """varlen flash Attention forward.
@@ -429,6 +437,7 @@ def flash_attention_fwd(
         BLOCK_DV=BLOCK_DV,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        is_mla=is_mla,
         num_warps=num_warps,
         num_stages=num_stages,
     )
