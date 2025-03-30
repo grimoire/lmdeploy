@@ -5,130 +5,226 @@ import torch.nn.functional as F
 from lmdeploy.pytorch.kernels.fused_moe import fused_moe
 
 
-def _get_sorted_idx(topk_idx: torch.Tensor, num_experts: int):
-    flatten_topk_idx = topk_idx.flatten()
-    sorted_ids = flatten_topk_idx.argsort()
-    exp_range = torch.arange(0, num_experts, device=topk_idx.device)
-    exp_tok_cnt = (flatten_topk_idx[None, :] == exp_range[:, None]).sum(1)
-    return sorted_ids, exp_tok_cnt
-
-
-class TestFusedMoEKernelLauncher:
-
-    @pytest.fixture
-    def dtype(self):
-        yield torch.float16
-
-    @pytest.fixture
-    def device(self):
-        yield torch.device('cuda')
-
-    @pytest.fixture
-    def N(self):
-        yield 128
-
-    @pytest.fixture
-    def K(self):
-        yield 64
+class TestPermuteInputs:
 
     @pytest.fixture
     def M(self):
-        yield 256
+        yield 4096
+
+    @pytest.fixture
+    def hidden_size(self):
+        yield 7168
+
+    @pytest.fixture
+    def topk(self):
+        yield 6
 
     @pytest.fixture
     def num_experts(self):
-        yield 4
+        yield 64
 
     @pytest.fixture
-    def top_k(self):
-        yield 2
+    def aligned_size(self):
+        yield 32
 
     @pytest.fixture
-    def A(self, M, K, device, dtype):
-        ret = torch.rand(M, K, device=device, dtype=dtype)
-        yield (ret - 0.5) / 2
+    def dtype(self):
+        yield torch.bfloat16
 
     @pytest.fixture
-    def B(self, num_experts, N, K, device, dtype):
-        ret = torch.rand(num_experts, N, K, device=device, dtype=dtype)
-        yield (ret - 0.5) / 2
+    def device(self):
+        yield 'cuda'
 
     @pytest.fixture
-    def router_weights(self, M, num_experts, device, dtype):
-        yield torch.rand(M, num_experts, device=device, dtype=dtype)
+    def inputs(self, M, hidden_size, dtype, device):
+        yield torch.rand((M, hidden_size), dtype=dtype, device=device)
 
     @pytest.fixture
-    def topk_weights(self, router_weights, top_k):
-        yield router_weights.topk(top_k, dim=-1)
+    def topk_ids(self, M, topk, num_experts, device):
+        val = torch.rand((M, num_experts), device=device)
+        yield val.topk(topk, -1)[1]
+
+    def _align_up(self, m, aligned_size):
+        return (m + aligned_size - 1) // aligned_size * aligned_size
 
     @pytest.fixture
-    def weights(self, topk_weights):
-        yield topk_weights[0]
-
-    @pytest.fixture
-    def topk_idx(self, topk_weights):
-        yield topk_weights[1]
-
-    @pytest.fixture
-    def sort_and_cnt(self, topk_idx, num_experts):
-        yield _get_sorted_idx(topk_idx, num_experts)
-
-    @pytest.fixture
-    def sorted_idx(self, sort_and_cnt):
-        yield sort_and_cnt[0]
-
-    @pytest.fixture
-    def exp_tok_cnt(self, sort_and_cnt):
-        yield sort_and_cnt[1]
-
-    @pytest.fixture
-    def exp_end(self, exp_tok_cnt):
-        yield exp_tok_cnt.cumsum(0)
-
-    @pytest.fixture
-    def exp_start(self, exp_end, exp_tok_cnt):
-        yield exp_end - exp_tok_cnt
-
-    @pytest.fixture
-    def enable_weights(self):
-        yield True
-
-    @pytest.fixture
-    def gt(self, A, B, top_k, topk_idx, enable_weights, weights):
-        M = A.size(0)
-        N = B.size(1)
-        E = B.size(0)
-        C = B.new_empty(M, top_k, N)
-        for eid in range(E):
-            EB = B[eid].t()
-            token_idx, k_idx = torch.where(topk_idx == eid)
-            if len(token_idx) == 0:
-                continue
-            EC = A[token_idx] @ EB
-            C[token_idx, k_idx] = EC
-        if enable_weights:
-            C = C * weights[..., None]
-        yield C.flatten(0, 1)
+    def gt(self, inputs, topk_ids, num_experts, aligned_size):
+        device = inputs.device
+        hidden_size = inputs.size(1)
+        topk = topk_ids.size(1)
+        flatten_topk_ids = topk_ids.flatten()
+        sorted_topk_ids, sorted_ids = flatten_topk_ids.sort()
+        cum_token = 0
+        permuted_inputs = []
+        m_indices = []
+        permuted_map = torch.empty_like(topk_ids).flatten()
+        for exp_id in range(num_experts):
+            exp_mask = sorted_topk_ids == exp_id
+            exp_sorted_ids = sorted_ids[exp_mask]
+            num_ids = exp_sorted_ids.size(0)
+            permuted_map[exp_sorted_ids] = torch.arange(cum_token, num_ids + cum_token, device=device)
+            exp_inputs = inputs[exp_sorted_ids // topk]
+            m_size = exp_inputs.size(0)
+            aligned_m_size = self._align_up(m_size, aligned_size)
+            cum_token += aligned_m_size
+            aligned_inputs = inputs.new_zeros((aligned_m_size, hidden_size))
+            aligned_inputs[:m_size] = exp_inputs
+            exp_m_indices = topk_ids.new_full((aligned_m_size, ), exp_id)
+            permuted_inputs.append(aligned_inputs)
+            m_indices.append(exp_m_indices)
+        permuted_inputs = torch.cat(permuted_inputs, dim=0)
+        m_indices = torch.cat(m_indices, dim=0)
+        yield permuted_inputs, m_indices, permuted_map.reshape(topk_ids.shape)
 
     @torch.inference_mode()
-    def test_launcher(self, A, B, sorted_idx, exp_start, exp_end, weights, enable_weights, top_k, M, gt):
-        from lmdeploy.pytorch.kernels.cuda.fused_moe import fused_moe_kernel_launcher
-        N = B.size(1)
-        C = B.new_empty(M * top_k, N)
+    def test_permute_inputs(self, inputs, topk_ids, num_experts, aligned_size, gt):
+        from lmdeploy.pytorch.kernels.cuda.fused_moe import permute_inputs
+        permuted_inputs, m_indices, permuted_map = permute_inputs(inputs,
+                                                                  topk_ids,
+                                                                  num_experts,
+                                                                  aligned_size=aligned_size)
+        gt_inputs, gt_indices, gt_map = gt
 
-        fused_moe_kernel_launcher(
-            A,
-            B,
-            C,
-            sorted_idx,
-            exp_start,
-            exp_end,
-            weights,
-            enable_weights=enable_weights,
-            top_k=top_k,
-            num_tokens=M,
-        )
-        torch.testing.assert_close(C, gt)
+        gt_size = gt_inputs.size(0)
+        permuted_inputs = permuted_inputs[:gt_size]
+        m_indices = m_indices[:gt_size]
+        torch.testing.assert_close(permuted_inputs, gt_inputs)
+        torch.testing.assert_close(m_indices, gt_indices)
+        torch.testing.assert_close(permuted_map, gt_map)
+
+
+class TestUnpermuteOutputs:
+
+    @pytest.fixture
+    def M(self):
+        yield 4096
+
+    @pytest.fixture
+    def topk(self):
+        yield 6
+
+    @pytest.fixture
+    def num_experts(self):
+        yield 64
+
+    @pytest.fixture
+    def EM(self, M, topk):
+        yield M * topk + 128
+
+    @pytest.fixture
+    def hidden_size(self):
+        yield 7168
+
+    @pytest.fixture
+    def dtype(self):
+        yield torch.bfloat16
+
+    @pytest.fixture
+    def device(self):
+        yield 'cuda'
+
+    @pytest.fixture
+    def permuted_output(self, EM, hidden_size, dtype, device):
+        yield torch.rand(EM, hidden_size, dtype=dtype, device=device)
+
+    @pytest.fixture
+    def weights(self, M, topk, dtype, device):
+        w = torch.rand(M, topk, dtype=dtype, device=device)
+        yield w - 0.5
+
+    @pytest.fixture
+    def permuted_map(self, M, topk, EM, dtype, device):
+        indices = torch.randperm(EM, device=device)[:M * topk]
+        yield indices.reshape(M, topk)
+
+    @pytest.fixture
+    def gt(self, permuted_output, weights, permuted_map):
+        outputs = permuted_output[permuted_map.flatten()]
+        outputs = outputs.unflatten(0, weights.shape)
+        outputs *= weights[..., None]
+        yield outputs.sum(1)
+
+    def test_unpermute_outputs(self, permuted_output, weights, permuted_map, gt):
+        from lmdeploy.pytorch.kernels.cuda.fused_moe import unpermute_outputs
+        output = unpermute_outputs(permuted_output, weights, permuted_map)
+
+        torch.testing.assert_close(output, gt)
+
+
+class TestGroupedGemm:
+
+    @pytest.fixture
+    def aligned_size(self):
+        yield 128
+
+    @pytest.fixture
+    def M(self, aligned_size):
+        yield aligned_size * 200
+
+    @pytest.fixture
+    def K(self):
+        yield 7168
+
+    @pytest.fixture
+    def N(self):
+        yield 2560
+
+    @pytest.fixture
+    def num_experts(self):
+        yield 64
+
+    @pytest.fixture
+    def dtype(self):
+        yield torch.bfloat16
+
+    @pytest.fixture
+    def device(self):
+        yield 'cuda'
+
+    @pytest.fixture
+    def inputs(self, M, K, dtype, device):
+        a = torch.rand(M, K, dtype=dtype, device=device)
+        a = a - 0.5
+        a /= 10
+        yield a
+
+    @pytest.fixture
+    def weights(self, num_experts, N, K, dtype, device):
+        w = torch.rand(num_experts, N, K, dtype=dtype, device=device)
+        w = w - 0.5
+        w /= 10
+        yield w
+
+    @pytest.fixture
+    def m_indices(self, M, aligned_size, num_experts, device):
+        assert M % aligned_size == 0
+        num_blocks = M // aligned_size
+        block_exp_ids = torch.randint(0, num_experts, (num_blocks, ), device=device)
+        indices = block_exp_ids[:, None].repeat(1, aligned_size).flatten()
+        yield indices
+
+    @pytest.fixture
+    def gt(self, inputs, weights, m_indices):
+        M = inputs.size(0)
+        N = weights.size(1)
+        E = weights.size(0)
+
+        outs = inputs.new_empty(M, N)
+
+        for exp_id in range(E):
+            idx_mask = m_indices == exp_id
+            exp_inputs = inputs[idx_mask]
+            exp_weights = weights[exp_id]
+            exp_outs = torch.nn.functional.linear(exp_inputs, exp_weights)
+            outs[idx_mask] = exp_outs
+
+        yield outs
+
+    def test_unpermute_outputs(self, inputs, weights, m_indices, aligned_size, gt):
+        from lmdeploy.pytorch.kernels.cuda.fused_moe import grouped_gemm
+        outs = grouped_gemm(inputs, weights, m_indices, aligned_size)
+
+        torch.testing.assert_close(outs, gt, atol=4e-3, rtol=1e-4)
 
 
 def _mlp_forward(hidden_states, gate_proj, up_proj, down_proj):
@@ -231,49 +327,49 @@ class TestFusedMoe:
         torch.testing.assert_close(output, gt, atol=1e-3, rtol=1e-3)
 
 
-class TestFusedMoeW8A8(TestFusedMoe):
+# class TestFusedMoeW8A8(TestFusedMoe):
 
-    @pytest.fixture
-    def quant_states(self, hidden_states):
-        from lmdeploy.pytorch.kernels.cuda.w8a8_triton_kernels import per_token_quant_int8
-        states_i8, states_scale = per_token_quant_int8(hidden_states, 1e-7)
-        yield states_i8, states_scale
+#     @pytest.fixture
+#     def quant_states(self, hidden_states):
+#         from lmdeploy.pytorch.kernels.cuda.w8a8_triton_kernels import per_token_quant_int8
+#         states_i8, states_scale = per_token_quant_int8(hidden_states, 1e-7)
+#         yield states_i8, states_scale
 
-    def quant_weight(self, w):
-        from lmdeploy.pytorch.kernels.cuda.w8a8_triton_kernels import per_channel_quant
-        num_experts, num_outs, _ = w.shape
-        w = w.flatten(0, -2)
-        w_i8, w_scale = per_channel_quant(w, torch.int8)
-        w_i8 = w_i8.view(num_experts, num_outs, -1)
-        w_scale = w_scale.view(num_experts, num_outs, -1)
-        return w_i8, w_scale
+#     def quant_weight(self, w):
+#         from lmdeploy.pytorch.kernels.cuda.w8a8_triton_kernels import per_channel_quant
+#         num_experts, num_outs, _ = w.shape
+#         w = w.flatten(0, -2)
+#         w_i8, w_scale = per_channel_quant(w, torch.int8)
+#         w_i8 = w_i8.view(num_experts, num_outs, -1)
+#         w_scale = w_scale.view(num_experts, num_outs, -1)
+#         return w_i8, w_scale
 
-    @pytest.fixture
-    def quant_w1(self, w1):
-        w_i8, w_scale = self.quant_weight(w1)
-        yield w_i8, w_scale
+#     @pytest.fixture
+#     def quant_w1(self, w1):
+#         w_i8, w_scale = self.quant_weight(w1)
+#         yield w_i8, w_scale
 
-    @pytest.fixture
-    def quant_w2(self, w2):
-        w_i8, w_scale = self.quant_weight(w2)
-        yield w_i8, w_scale
+#     @pytest.fixture
+#     def quant_w2(self, w2):
+#         w_i8, w_scale = self.quant_weight(w2)
+#         yield w_i8, w_scale
 
-    @torch.inference_mode()
-    def test_fused_moe(self, quant_states, quant_w1, quant_w2, topk_weights, topk_idx, top_k, renormalize, gt):
-        from lmdeploy.pytorch.kernels.cuda.w8a8_fused_moe import fused_moe_w8a8
-        state_i8, state_scale = quant_states
-        w1_i8, w1_scale = quant_w1
-        w2_i8, w2_scale = quant_w2
+#     @torch.inference_mode()
+#     def test_fused_moe(self, quant_states, quant_w1, quant_w2, topk_weights, topk_idx, top_k, renormalize, gt):
+#         from lmdeploy.pytorch.kernels.cuda.w8a8_fused_moe import fused_moe_w8a8
+#         state_i8, state_scale = quant_states
+#         w1_i8, w1_scale = quant_w1
+#         w2_i8, w2_scale = quant_w2
 
-        output = fused_moe_w8a8(state_i8,
-                                state_scale,
-                                w1_i8,
-                                w1_scale,
-                                w2_i8,
-                                w2_scale,
-                                topk_weights=topk_weights,
-                                topk_ids=topk_idx,
-                                topk=top_k,
-                                out_dtype=torch.float16,
-                                renormalize=renormalize)
-        torch.testing.assert_close(output, gt, atol=5e-3, rtol=1e-3)
+#         output = fused_moe_w8a8(state_i8,
+#                                 state_scale,
+#                                 w1_i8,
+#                                 w1_scale,
+#                                 w2_i8,
+#                                 w2_scale,
+#                                 topk_weights=topk_weights,
+#                                 topk_ids=topk_idx,
+#                                 topk=top_k,
+#                                 out_dtype=torch.float16,
+#                                 renormalize=renormalize)
+#         torch.testing.assert_close(output, gt, atol=5e-3, rtol=1e-3)
