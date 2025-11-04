@@ -901,7 +901,12 @@ class Engine(EngineBase):
             return None
 
         # schedule decoding if no valid prefill reqs.
-        if prefill and len(scheduler_output.running) == 0 and self.engine_config.role != EngineRole.Prefill:
+        schedule_decoding = prefill and len(scheduler_output.running) == 0
+        # disable decoding for prefill role
+        schedule_decoding = schedule_decoding and (self.engine_config.role != EngineRole.Prefill)
+        # disable decoding if no running reqs.
+        schedule_decoding = schedule_decoding and scheduler.has_running()
+        if schedule_decoding:
             prefill = False
             prealloc_size = self.engine_strategy.get_prealloc_size(not prefill)
             scheduler_output = scheduler.schedule(is_prefill=prefill, prealloc_size=prealloc_size)
