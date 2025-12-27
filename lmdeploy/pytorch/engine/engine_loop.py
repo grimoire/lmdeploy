@@ -465,13 +465,13 @@ class EngineLoop:
         try:
             await wait_for_async_tasks(tasks)
         except asyncio.CancelledError:
-            logger.debug('EngineLoop wait_tasks cancelled.')
+            logger.error('EngineLoop wait_tasks cancelled.')
             raise
         except BaseException:
             logger.error('EngineLoop wait_tasks failed.')
             raise
         finally:
-            logger.debug('EngineLoop wait_tasks cleanup.')
+            logger.error('EngineLoop wait_tasks cleanup.')
 
     def stop(self):
         """Stop all loops."""

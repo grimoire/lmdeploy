@@ -407,20 +407,21 @@ class RayExecutor(ExecutorBase):
         try:
             await wait_for_async_tasks(tasks)
         except asyncio.CancelledError:
-            logger.debug(f'RayExecutor DP[{dp_rank}] wait_tasks cancelled.')
+            logger.error(f'RayExecutor DP[{dp_rank}] wait_tasks cancelled.')
             raise
         except BaseException:
             logger.error(f'RayExecutor DP[{dp_rank}] wait_tasks failed.')
             raise
         finally:
-            logger.debug(f'RayExecutor DP[{dp_rank}] wait_tasks cleanup.')
-            # for task in tasks_to_cancel:
-            #     try:
-            #         ray.cancel(task)
-            #     except ray.exceptions.ActorDiedError:
-            #         logger.debug('RayExecutor worker has been killed before finish cancel task.')
-            #     except Exception as e:
-            #         logger.error(f'RayExecutor DP[{dp_rank}] Cancel wait_tasks failed: {e}')
+            logger.error(f'RayExecutor DP[{dp_rank}] wait_tasks cleanup.')
+            # TODO: make sure cancel before release
+            for task in tasks_to_cancel:
+                try:
+                    ray.cancel(task)
+                except ray.exceptions.ActorDiedError:
+                    logger.error('RayExecutor worker has been killed before finish cancel task.')
+                except Exception as e:
+                    logger.error(f'RayExecutor DP[{dp_rank}] Cancel wait_tasks failed: {e}')
 
     def stop(self):
         """Stop engine loop."""

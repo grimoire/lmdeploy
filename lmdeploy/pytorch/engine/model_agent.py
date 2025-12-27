@@ -929,6 +929,7 @@ class BaseModelAgent:
             logger.exception(msg)
             raise e from None
         finally:
+            print(11111111111111)
             logger.debug(f'ModelAgent rank[{self.rank}] wait_tasks cleanup.')
 
     def stop(self):
