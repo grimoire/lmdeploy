@@ -4,6 +4,7 @@ from typing import Any
 import torch
 from fla.ops.utils.index import prepare_chunk_indices
 
+from .chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from .utils import chunk_local_cumsum
 
 RCP_LN2 = 1.4426950216
@@ -34,6 +35,18 @@ def chunk_gated_delta_rule_fwd(
         scale=RCP_LN2 if use_exp2 else None,
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
+    )
+
+    # obtain WY representation. u is actually the new v.
+    # fused kkt + solve_tril + recompute_w_u
+    w, u, A = chunk_gated_delta_rule_fwd_intra(
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
     )
 
     return [None] * 6
