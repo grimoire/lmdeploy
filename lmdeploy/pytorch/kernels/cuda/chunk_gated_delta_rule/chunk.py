@@ -4,6 +4,7 @@ from typing import Any
 import torch
 from fla.ops.utils.index import prepare_chunk_indices
 
+from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from .utils import chunk_local_cumsum
 
@@ -47,6 +48,19 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         use_exp2=use_exp2,
+    )
+
+    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+        k=k,
+        w=w,
+        u=u,
+        g=g,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
+        transpose_state_layout=transpose_state_layout,
     )
 
     return [None] * 6
