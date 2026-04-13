@@ -6,6 +6,7 @@ from fla.ops.utils.index import prepare_chunk_indices
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_fwd import chunk_gated_delta_rule_fwd_intra
+from .chunk_o import chunk_fwd_o
 from .utils import chunk_local_cumsum
 
 RCP_LN2 = 1.4426950216
@@ -29,6 +30,7 @@ def chunk_gated_delta_rule_fwd(
     A_log: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
 ):
+    g_input = g if use_gate_in_kernel else None
     assert use_gate_in_kernel is False, 'use_gate_in_kernel=True is not supported in the current implementation'
     g = chunk_local_cumsum(
         g,
@@ -63,7 +65,19 @@ def chunk_gated_delta_rule_fwd(
         transpose_state_layout=transpose_state_layout,
     )
 
-    return [None] * 6
+    o = chunk_fwd_o(
+        q=q,
+        k=k,
+        v=v_new,
+        h=h,
+        g=g,
+        scale=scale,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        use_exp2=use_exp2,
+        transpose_state_layout=transpose_state_layout,
+    )
+    return g, o, A, final_state, initial_state, g_input
 
 
 def chunk_gated_delta_rule(

@@ -3,7 +3,7 @@ import tilelang
 import tilelang.language as T
 import tilelang.layout
 import torch
-from fla.ops.utils import prepare_chunk_indices, prepare_chunk_offsets
+from fla.ops.utils import prepare_chunk_offsets
 
 
 @T.macro
@@ -253,20 +253,19 @@ def chunk_gated_delta_rule_fwd_h(
     chunk_indices: torch.LongTensor | None = None,
     use_exp2: bool = False,
     transpose_state_layout: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     """Compute the forward chunk-state recurrence for chunk gated delta
     rule."""
     B, T, H, K = k.shape
     HV, V = u.shape[2], u.shape[-1]
     BT = chunk_size
 
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, chunk_size, cu_seqlens_cpu=cu_seqlens_cpu)
     if cu_seqlens is None:
         N = B
         NT = (T + BT - 1) // BT
         chunk_offsets = None
     else:
+        assert chunk_indices is not None
         N = len(cu_seqlens) - 1
         NT = len(chunk_indices)
         chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
