@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
-import torch
 import tilelang
 import tilelang.language as T
+import torch
 
 
 @tilelang.jit(pass_configs={
@@ -84,8 +84,8 @@ def chunk_fwd_kernel_o(H: int,
                     if offs_t + i < seqlen and offs_k + j < K:
                         b_q[i, j] = Q_in[i_b, bos + offs_t + i, i_qkh, offs_k + j]
                     else:
-                        b_q[i, j] = 0.0 
-                
+                        b_q[i, j] = 0.0
+
                 for i, j in T.Parallel(BT, BK):
                     if offs_t + i < seqlen and offs_k + j < K:
                         b_k[i, j] = K_in[i_b, bos + offs_t + i, i_qkh, offs_k + j]
@@ -141,9 +141,9 @@ def chunk_fwd_kernel_o(H: int,
             T.gemm(b_sA, b_v, b_av, clear_accum=True)
             for i, j in T.Parallel(BT, BV):
                 b_o[i, j] = b_o[i, j] * scale + b_av[i, j] * scale
-            
+
             T.copy(b_o, b_v)
-            
+
             for i, j in T.Parallel(BT, BV):
                 if offs_t + i < seqlen and offs_v + j < V:
                     Out[i_b, bos + offs_t + i, i_h, offs_v + j] = b_v[i, j]
@@ -165,7 +165,7 @@ def chunk_fwd_o(
     transpose_state_layout: bool = False,
 ) -> torch.Tensor:
     assert g_gamma is None
-    B, T, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
+    _, _, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
 
     o = torch.empty_like(v)
