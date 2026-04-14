@@ -139,6 +139,7 @@ def chunk_gated_delta_rule(
         q = torch.nn.functional.normalize(q, p=2, dim=-1)
         k = torch.nn.functional.normalize(k, p=2, dim=-1)
 
+    # TODO: avoid using `prepare_chunk_indices` and `prepare_chunk_offsets` in chunk gated delta kernel
     chunk_indices = prepare_chunk_indices(
         cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
     if chunk_indices is not None and chunk_indices.dtype != torch.int32:

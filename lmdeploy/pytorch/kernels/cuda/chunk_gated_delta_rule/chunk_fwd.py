@@ -5,7 +5,6 @@ import tilelang
 import tilelang.language as T
 import tilelang.layout
 import torch
-from fla.ops.utils.index import prepare_chunk_indices
 
 from .wy_fast import recompute_w_u_fwd
 
@@ -503,8 +502,6 @@ def chunk_gated_delta_rule_fwd_intra(
     B, TT, H, K, HV = *k.shape, beta.shape[2]
     BT = chunk_size
 
-    if chunk_indices is None and cu_seqlens is not None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     if cu_seqlens is not None:
         cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
         chunk_indices = chunk_indices.to(torch.int32) if chunk_indices.dtype != torch.int32 else chunk_indices
