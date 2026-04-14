@@ -4,6 +4,7 @@ from functools import lru_cache
 import torch
 import triton
 import triton.language as tl
+from torch.profiler import record_function
 
 from ..gated_delta_rule import GatedDeltaRuleBuilder, GatedDeltaRuleImpl
 from .utils import has_tilelang
@@ -16,6 +17,16 @@ def has_fla():
         return True
     except Exception:
         return False
+
+
+@lru_cache
+def should_use_lmdeploy_chunk():
+    if not has_tilelang():
+        return False
+    if not torch.cuda.is_available():
+        return False
+    major, _minor = torch.cuda.get_device_capability()
+    return major >= 9
 
 
 @triton.jit
@@ -146,14 +157,22 @@ class CudaGatedDeltaRuleImpl(GatedDeltaRuleImpl):
         import os
         os.environ['FLA_INTRACARD_CP'] = '0'
 
-        if not has_fla() or not has_tilelang():
-            raise ImportError('fla and tilelang is required for CudaGatedDeltaRuleImpl')
-        from fla.ops.gated_delta_rule import chunk_gated_delta_rule
-
         from lmdeploy.pytorch.kernels.cuda.gated_delta_rule import fused_recurrent_gated_delta_rule
-        self.chunk_func = chunk_gated_delta_rule
+
+        self.chunk_func = None
+        if should_use_lmdeploy_chunk():
+            from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.chunk import chunk_gated_delta_rule
+            self.chunk_func = chunk_gated_delta_rule
+        elif has_fla():
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+            self.chunk_func = chunk_gated_delta_rule
+        else:
+            raise ImportError('either lmdeploy chunk kernel (sm>=9.0 with tilelang) or fla is required '
+                              'for CudaGatedDeltaRuleImpl')
+
         self.recurrent_func = fused_recurrent_gated_delta_rule
 
+    @record_function('chunk_gated_delta_rule')
     def chunk_gated_delta_rule(
         self,
         q: torch.Tensor,

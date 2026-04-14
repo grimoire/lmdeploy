@@ -265,10 +265,12 @@ def chunk_gated_delta_rule_fwd_h(
         NT = (T + BT - 1) // BT
         chunk_offsets = None
     else:
+        cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
         assert chunk_indices is not None
         N = len(cu_seqlens) - 1
         NT = len(chunk_indices)
         chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
+        chunk_offsets = chunk_offsets.to(torch.int32) if chunk_offsets.dtype != torch.int32 else chunk_offsets
 
     assert transpose_state_layout is False, 'transpose_state_layout=True is not supported'
     assert K in (64, 128) and V in (64, 128) and BT == 64, 'kernel supports K/V in {64,128} with BT=64'
@@ -286,7 +288,7 @@ def chunk_gated_delta_rule_fwd_h(
         dtype=k.dtype,
         state_dtype=initial_state.dtype if initial_state is not None else torch.float32,
         g_dtype=g.dtype if g is not None else (gk.dtype if gk is not None else torch.float32),
-        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.long,
+        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.int32,
         use_g=g is not None,
         use_gk=gk is not None,
         use_initial_state=initial_state is not None,

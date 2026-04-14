@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from collections.abc import Sequence
+
 import tilelang
 import tilelang.language as T
 import tilelang.layout
@@ -173,6 +175,7 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     K: int,
     HV: int,
     BT: int,
+    k_post_stride: Sequence[int],
     dtype: torch.dtype,
     a_dtype: torch.dtype,
     g_dtype: torch.dtype,
@@ -203,6 +206,8 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
     B = 1 if is_varlen else T.dynamic('B')
     N = T.dynamic('N')
     TT = T.dynamic('TT')
+    k_stride0 = T.dynamic('k_stride0')
+    k_stride = (k_stride0, *k_post_stride)
 
     NC = T.dynamic('NC')
     NT = T.ceildiv(TT, BT) if not is_varlen else NC
@@ -214,12 +219,12 @@ def chunk_gated_delta_rule_fwd_kkt_solve_kernel(
 
     @T.prim_func
     def chunk_gated_delta_rule_fwd_kkt_solve_main(
-        K_in: T.Tensor((B, TT, H, K), dtype=dtype),
+        K_in: T.StridedTensor((B, TT, H, K), dtype=dtype, strides=k_stride),
         A: T.Tensor((B, TT, HV, BT), dtype=a_dtype),
         G: T.Tensor((B, TT, HV), dtype=g_dtype) = None,
         Beta: T.Tensor((B, TT, HV), dtype=beta_dtype) = None,
         CuSeqlens: T.Tensor((N + 1,), dtype=cu_seqlen_dtype) = None,
-        ChunkIndices: T.Tensor((NT, 2), dtype=torch.long) = None,
+        ChunkIndices: T.Tensor((NT, 2), dtype=torch.int32) = None,
     ):
         with T.Kernel(NT, seq_count * HV, threads=64) as (i_t, i_bh):
             i_b = i_bh // HV
@@ -507,6 +512,8 @@ def chunk_gated_delta_rule_fwd_intra(
     if chunk_indices is None and cu_seqlens is not None:
         chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
+        chunk_indices = chunk_indices.to(torch.int32) if chunk_indices.dtype != torch.int32 else chunk_indices
         assert chunk_indices is not None
         assert cu_seqlens.is_contiguous()
         assert chunk_indices.is_contiguous()
@@ -517,11 +524,12 @@ def chunk_gated_delta_rule_fwd_intra(
         K=K,
         HV=HV,
         BT=BT,
+        k_post_stride=k.stride()[1:],
         dtype=k.dtype,
         a_dtype=A.dtype,
         g_dtype=g.dtype if g is not None else torch.float32,
         beta_dtype=beta.dtype,
-        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.long,
+        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.int32,
         use_g=g is not None,
         is_varlen=cu_seqlens is not None,
         use_exp2=use_exp2,

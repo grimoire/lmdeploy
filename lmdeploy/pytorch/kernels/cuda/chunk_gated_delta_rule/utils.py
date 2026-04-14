@@ -39,7 +39,7 @@ def chunk_local_cumsum_scalar_kernel(H: int,
         G: T.Tensor(g_shape, dtype=dtype),
         Out: T.Tensor(g_shape, dtype=output_dtype),
         CuSeqlens: T.Tensor((N + 1,), dtype=cu_seqlen_dtype) = None,
-        ChunkIndices: T.Tensor((NT, 2), dtype=torch.long) = None,
+        ChunkIndices: T.Tensor((NT, 2), dtype=torch.int32) = None,
     ):
         with T.Kernel(NT, seq_count * H, threads=num_threads) as (i_t, i_bh):
             i_b = 0 if is_varlen else i_bh // H
@@ -112,6 +112,8 @@ def chunk_local_cumsum_scalar(
     if cu_seqlens is not None:
         assert B == 1, 'Only batch size 1 is supported when cu_seqlens are provided'
         assert chunk_indices is not None, 'chunk_indices must be provided when cu_seqlens are provided'
+        cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
+        chunk_indices = chunk_indices.to(torch.int32) if chunk_indices.dtype != torch.int32 else chunk_indices
         assert cu_seqlens.is_contiguous(), 'cu_seqlens tensor must be contiguous'
         assert chunk_indices.is_contiguous(), 'chunk_indices tensor must be contiguous'
     out = torch.empty_like(g, dtype=output_dtype or g.dtype)
@@ -124,7 +126,7 @@ def chunk_local_cumsum_scalar(
         scale=scale,
         head_first=head_first,
         output_dtype=output_dtype or g.dtype,
-        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.long,
+        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.int32,
         is_varlen=cu_seqlens is not None,
     )
     kernel(

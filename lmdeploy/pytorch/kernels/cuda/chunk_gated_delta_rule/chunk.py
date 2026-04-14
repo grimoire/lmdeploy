@@ -124,6 +124,9 @@ def chunk_gated_delta_rule(
                 f'The number of initial states is expected to be equal to the number of input sequences, '
                 f'i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}.',
             )
+        cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
+        if cu_seqlens_cpu is not None:
+            cu_seqlens_cpu = cu_seqlens_cpu.to(torch.int32) if cu_seqlens_cpu.dtype != torch.int32 else cu_seqlens_cpu
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
@@ -138,6 +141,8 @@ def chunk_gated_delta_rule(
 
     chunk_indices = prepare_chunk_indices(
         cu_seqlens, 64, cu_seqlens_cpu=cu_seqlens_cpu) if cu_seqlens is not None else None
+    if chunk_indices is not None and chunk_indices.dtype != torch.int32:
+        chunk_indices = chunk_indices.to(torch.int32)
     _, o, _, final_state, _, _ = chunk_gated_delta_rule_fwd(
         q=q,
         k=k,

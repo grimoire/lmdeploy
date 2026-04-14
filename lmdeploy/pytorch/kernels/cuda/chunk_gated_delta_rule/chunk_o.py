@@ -46,7 +46,7 @@ def chunk_fwd_kernel_o(H: int,
         Out: T.Tensor((B, TT, HV, V), dtype=dtype),
         G: T.Tensor((B, TT, HV), dtype=g_dtype) = None,
         CuSeqlens: T.Tensor((N + 1,), dtype=cu_seqlen_dtype) = None,
-        ChunkIndices: T.Tensor((NT, 2), dtype=cu_seqlen_dtype) = None,
+        ChunkIndices: T.Tensor((NT, 2), dtype=torch.int32) = None,
     ):
         with T.Kernel(T.ceildiv(V, BV), NT, B * HV, threads=num_threads) as (i_v, i_t, i_bh):
             i_b = i_bh // HV
@@ -167,6 +167,10 @@ def chunk_fwd_o(
     assert g_gamma is None
     _, _, H, K, V, HV = *q.shape, v.shape[-1], v.shape[2]
     BT = chunk_size
+    if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
+    if chunk_indices is not None:
+        chunk_indices = chunk_indices.to(torch.int32) if chunk_indices.dtype != torch.int32 else chunk_indices
 
     o = torch.empty_like(v)
     kernel = chunk_fwd_kernel_o(
@@ -178,7 +182,7 @@ def chunk_fwd_o(
         scale=scale,
         dtype=q.dtype,
         g_dtype=g.dtype if g is not None else torch.float32,
-        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.int64,
+        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.int32,
         is_varlen=cu_seqlens is not None,
         transpose_state=transpose_state_layout,
         use_g=g is not None,

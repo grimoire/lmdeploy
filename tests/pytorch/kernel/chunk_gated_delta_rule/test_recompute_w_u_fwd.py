@@ -27,6 +27,20 @@ def get_tolerances(dtype: torch.dtype) -> tuple[float, float]:
     return 1e-2, 1e-2
 
 
+def make_varlen_view(total: int,
+                     heads: int,
+                     dim: int,
+                     dtype: torch.dtype,
+                     stride0_scale: int = 2) -> torch.Tensor:
+    base = torch.rand(stride0_scale, total, heads, dim, dtype=dtype, device='cuda') - 0.5
+    return base[:1]
+
+
+def make_fully_strided_varlen_view(total: int, heads: int, dim: int, dtype: torch.dtype) -> torch.Tensor:
+    base = torch.rand(2, total, heads, dim * 2, dtype=dtype, device='cuda') - 0.5
+    return base[:1, :, :, ::2]
+
+
 def torch_ref(k, v, beta, A, g=None, cu_seqlens=None, chunk_indices=None, use_exp2=False):
     batch, total, num_heads, head_dim = k.shape
     _, _, num_v_heads, value_dim = v.shape
@@ -114,21 +128,36 @@ class TestRecomputeWUForward:
         torch.testing.assert_close(out_u, ref_u.to(out_u.dtype), atol=atol, rtol=rtol)
 
     @pytest.mark.parametrize(
-        'cu_seqlens,heads,v_heads,head_dim,value_dim,chunk_size,dtype,beta_dtype,a_dtype,use_g,use_exp2',
+        'cu_seqlens,heads,v_heads,head_dim,value_dim,chunk_size,dtype,beta_dtype,a_dtype,use_g,use_exp2,non_contiguous_kv,fully_strided_kv',
         [
-            ([0, 65, 129], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.bfloat16, False, False),
-            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.bfloat16, True, False),
-            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True),
-            ([0, 97, 211], 4, 4, 64, 64, 64, torch.float32, torch.float32, torch.float32, True, False),
+            ([0, 65, 129], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16,
+             torch.bfloat16, False, False, False, False),
+            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16,
+             torch.bfloat16, True, False, False, False),
+            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16,
+             torch.bfloat16, True, True, False, False),
+            ([0, 97, 211], 4, 4, 64, 64, 64, torch.float32, torch.float32,
+             torch.float32, True, False, False, False),
+            ([0, 127, 257], 16, 32, 128, 128, 64, torch.bfloat16, torch.bfloat16,
+             torch.bfloat16, True, False, True, False),
+            ([0, 127, 257], 16, 32, 128, 128, 64, torch.bfloat16, torch.bfloat16,
+             torch.bfloat16, True, False, False, True),
         ],
     )
     def test_varlen(self, cu_seqlens, heads, v_heads, head_dim, value_dim, chunk_size, dtype, beta_dtype, a_dtype,
-                    use_g, use_exp2):
+                    use_g, use_exp2, non_contiguous_kv, fully_strided_kv):
         from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.wy_fast import recompute_w_u_fwd
 
         total = cu_seqlens[-1]
-        k = torch.rand(1, total, heads, head_dim, dtype=dtype) - 0.5
-        v = torch.rand(1, total, v_heads, value_dim, dtype=dtype) - 0.5
+        if fully_strided_kv:
+            k = make_fully_strided_varlen_view(total, heads, head_dim, dtype)
+            v = make_fully_strided_varlen_view(total, v_heads, value_dim, dtype)
+        elif non_contiguous_kv:
+            k = make_varlen_view(total, heads, head_dim, dtype)
+            v = make_varlen_view(total, v_heads, value_dim, dtype)
+        else:
+            k = torch.rand(1, total, heads, head_dim, dtype=dtype) - 0.5
+            v = torch.rand(1, total, v_heads, value_dim, dtype=dtype) - 0.5
         beta = torch.rand(1, total, v_heads, dtype=beta_dtype)
         A = torch.rand(1, total, v_heads, chunk_size, dtype=a_dtype) - 0.5
         g = None

@@ -14,6 +14,8 @@ def recompute_w_u_fwd_kernel(H: int,
                              K: int,
                              V: int,
                              BT: int,
+                             k_post_stride: tuple,
+                             v_post_stride: tuple,
                              dtype: torch.dtype,
                              cu_seqlen_dtype: torch.dtype,
                              a_dtype: torch.dtype,
@@ -26,6 +28,10 @@ def recompute_w_u_fwd_kernel(H: int,
     B = 1 if is_varlen else T.dynamic('B')
     N = T.dynamic('N')
     TT = T.dynamic('TT')
+    k_stride0 = T.dynamic('k_stride0')
+    v_stride0 = T.dynamic('v_stride0')
+    k_stride = (k_stride0, *k_post_stride)
+    v_stride = (v_stride0, *v_post_stride)
 
     NC = T.dynamic('NC')
     NT = T.ceildiv(TT, BT) if not is_varlen else NC
@@ -39,13 +45,13 @@ def recompute_w_u_fwd_kernel(H: int,
 
     @T.prim_func
     def recompute_w_u_fwd_main(
-        K_in: T.Tensor((B, TT, H, K), dtype=dtype),
-        V_in: T.Tensor((B, TT, HV, V), dtype=dtype),
+        K_in: T.StridedTensor((B, TT, H, K), dtype=dtype, strides=k_stride),
+        V_in: T.StridedTensor((B, TT, HV, V), dtype=dtype, strides=v_stride),
         Beta: T.Tensor((B, TT, HV), dtype=beta_dtype),
         A: T.Tensor((B, TT, HV, BT), dtype=a_dtype),
         G: T.Tensor((B, TT, HV), dtype=g_dtype) = None,
         CuSeqlens: T.Tensor((N + 1,), dtype=cu_seqlen_dtype) = None,
-        ChunkIndices: T.Tensor((NT, 2), dtype=torch.long) = None,
+        ChunkIndices: T.Tensor((NT, 2), dtype=torch.int32) = None,
         W_out: T.Tensor((B, TT, HV, K), dtype=dtype) = None,
         U_out: T.Tensor((B, TT, HV, V), dtype=dtype) = None,
     ):
@@ -82,7 +88,6 @@ def recompute_w_u_fwd_kernel(H: int,
 
             for i_v in T.Pipelined(NV, num_stages=num_stages_v):
                 b_vb = T.alloc_shared((BT, BV), dtype=dtype)
-                T.annotate_layout({b_vb: tilelang.layout.make_swizzled_layout(b_vb)})
                 for i, j in T.Parallel(BT, BV):
                     row_offset = i_t * BT + i
                     v_idx = i_v * BV + j
@@ -118,7 +123,6 @@ def recompute_w_u_fwd_kernel(H: int,
 
             for i_k in T.Pipelined(NK, num_stages=num_stages_k):
                 b_kb = T.alloc_shared((BT, BK), dtype=dtype)
-                T.annotate_layout({b_kb: tilelang.layout.make_swizzled_layout(b_kb)})
                 for i, j in T.Parallel(BT, BK):
                     row_offset = i_t * BT + i
                     k_idx = i_k * BK + j
@@ -194,6 +198,8 @@ def recompute_w_u_fwd(
     BT = A.shape[-1]
 
     if cu_seqlens is not None:
+        cu_seqlens = cu_seqlens.to(torch.int32) if cu_seqlens.dtype != torch.int32 else cu_seqlens
+        chunk_indices = chunk_indices.to(torch.int32) if chunk_indices.dtype != torch.int32 else chunk_indices
         assert chunk_indices is not None
         assert cu_seqlens.is_contiguous()
         assert chunk_indices.is_contiguous()
@@ -206,8 +212,10 @@ def recompute_w_u_fwd(
         K=K,
         V=V,
         BT=BT,
+        k_post_stride=k.stride()[1:],
+        v_post_stride=v.stride()[1:],
         dtype=k.dtype,
-        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.long,
+        cu_seqlen_dtype=cu_seqlens.dtype if cu_seqlens is not None else torch.int32,
         a_dtype=A.dtype,
         beta_dtype=beta.dtype,
         g_dtype=g.dtype if g is not None else torch.float,
