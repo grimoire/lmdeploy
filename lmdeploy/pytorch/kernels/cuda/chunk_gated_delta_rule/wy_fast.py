@@ -6,7 +6,7 @@ import torch
 
 
 @tilelang.jit(pass_configs={
-    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: False,
+    tilelang.PassConfigKey.TL_ENABLE_FAST_MATH: True,
     tilelang.PassConfigKey.TL_DISABLE_SAFE_MEMORY_ACCESS: True,
 }, )
 def recompute_w_u_fwd_kernel(H: int,
@@ -69,7 +69,6 @@ def recompute_w_u_fwd_kernel(H: int,
                 seqlen = TT
 
             b_A = T.alloc_shared((BT, BT), dtype=a_dtype)
-            T.annotate_layout({b_A: tilelang.layout.make_swizzled_layout(b_A)})
             for i, j in T.Parallel(BT, BT):
                 row_offset = i_t * BT + i
                 if row_offset < seqlen:
@@ -98,6 +97,9 @@ def recompute_w_u_fwd_kernel(H: int,
 
                 u_frag = T.alloc_fragment((BT, BV), dtype=T.float32)
                 b_u = T.alloc_shared((BT, BV), dtype=dtype)
+                T.annotate_layout(
+                    {b_u: tilelang.layout.make_swizzled_layout(b_u)}
+                )
                 T.clear(u_frag)
                 T.gemm(b_A, b_vb, u_frag)
                 T.copy(u_frag, b_u)
@@ -137,6 +139,9 @@ def recompute_w_u_fwd_kernel(H: int,
 
                 w_frag = T.alloc_fragment((BT, BK), dtype=T.float32)
                 b_w = T.alloc_shared((BT, BK), dtype=dtype)
+                T.annotate_layout(
+                    {b_w: tilelang.layout.make_swizzled_layout(b_w)}
+                )
                 T.clear(w_frag)
                 T.gemm(b_A, b_kb, w_frag)
                 T.copy(w_frag, b_w)
@@ -223,6 +228,8 @@ def recompute_w_u_fwd(
         use_exp2=use_exp2,
         is_varlen=cu_seqlens is not None,
     )
+    from lmdeploy.pytorch.tools.utils import dump_tilelang_source
+    dump_tilelang_source(kernel, '/nvme1/yaoqian/space/tmp/lmdeploy_test/develop/chunk_gdr/src/tvm_kernel.cu')
     kernel(
         k,
         v,

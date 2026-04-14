@@ -89,7 +89,9 @@ def chunk_gated_delta_rule_fwd_h_kernel_unsplit(
     seq_count = N_seq if is_varlen else B
     state_shape = (N_state, HV, K, V)
 
-    BV = 32
+    BV = 64
+    num_stages = 2
+
     assert K in (64, 128) and V in (64, 128) and BT == 64
 
     num_threads = num_warps * 32
@@ -140,10 +142,7 @@ def chunk_gated_delta_rule_fwd_h_kernel_unsplit(
             b_row_scale = T.alloc_shared([BT], T.float32)
             b_gk = T.alloc_shared([K, 1], T.float32)
             T.annotate_layout({
-                b_w: tilelang.layout.make_swizzled_layout(b_w),
-                b_k: tilelang.layout.make_swizzled_layout(b_k),
                 b_u: tilelang.layout.make_swizzled_layout(b_u),
-                b_vnew: tilelang.layout.make_swizzled_layout(b_vnew),
             })
 
             if use_initial_state:
@@ -151,7 +150,7 @@ def chunk_gated_delta_rule_fwd_h_kernel_unsplit(
             else:
                 T.clear(b_h_frag)
 
-            for chunk_idx in T.Pipelined(num_chunks, num_stages=4):
+            for chunk_idx in T.Pipelined(num_chunks, num_stages=num_stages):
                 chunk_slot = T.cast(chunk_base + chunk_idx, T.int32) if is_varlen else T.cast(chunk_idx, T.int32)
                 seq_base = T.cast(chunk_idx * BT, T.int32)
                 chunk_end_candidate = T.cast((chunk_idx + 1) * BT, T.int32)
@@ -234,7 +233,12 @@ def chunk_gated_delta_rule_fwd_h_kernel_unsplit(
                 T.gemm(b_k, b_vnew, b_h_frag, transpose_A=True)
 
             if store_final_state:
-                _store_final_const(FinalState_out, b_h_frag, seq_id, hv_id, v_base, K, BV, V)
+                b_h_shared1 = T.alloc_shared([K, BV], T.float32)
+                T.annotate_layout({
+                    b_h_shared1: tilelang.layout.make_swizzled_layout(b_h_shared1),
+                })
+                T.copy(b_h_frag, b_h_shared1)
+                _store_final_const(FinalState_out, b_h_shared1, seq_id, hv_id, v_base, K, BV, V)
 
     return chunk_gated_delta_rule_fwd_h_main
 

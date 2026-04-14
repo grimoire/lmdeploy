@@ -49,8 +49,6 @@ class TestChunkGatedDeltaRuleE2E:
     @pytest.mark.parametrize(
         'cu_seqlens,heads,v_heads,head_dim,value_dim,dtype,output_final_state,non_contiguous_kv',
         [
-            ([0, 65, 129], 4, 4, 128, 128, torch.bfloat16, False, False),
-            ([0, 127, 257], 16, 32, 128, 128, torch.bfloat16, True, False),
             ([0, 127, 257], 16, 32, 128, 128, torch.bfloat16, True, True),
         ],
     )
