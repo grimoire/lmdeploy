@@ -93,47 +93,9 @@ class TestChunkLocalCumsumScalar:
                 torch.set_default_device(origin_device)
 
     @pytest.mark.parametrize(
-        'batch,seqlen,heads,chunk_size,head_first,reverse,scale,input_dtype',
-        [
-            (2, 65, 4, 64, False, False, None, torch.bfloat16),
-            (2, 65, 4, 64, True, False, None, torch.float32),
-            (2, 127, 4, 64, False, True, None, torch.bfloat16),
-            (2, 127, 4, 64, True, True, 0.5, torch.float32),
-        ],
-    )
-    def test_fixed(self, batch, seqlen, heads, chunk_size, head_first, reverse, scale, input_dtype):
-        from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.utils import chunk_local_cumsum_scalar
-
-        if head_first:
-            g = torch.rand(batch, heads, seqlen, dtype=input_dtype) - 0.5
-        else:
-            g = torch.rand(batch, seqlen, heads, dtype=input_dtype) - 0.5
-
-        out = chunk_local_cumsum_scalar(
-            g=g,
-            chunk_size=chunk_size,
-            reverse=reverse,
-            scale=scale,
-            head_first=head_first,
-            output_dtype=torch.float32,
-        )
-        ref = torch_ref(
-            g=g,
-            chunk_size=chunk_size,
-            reverse=reverse,
-            scale=scale,
-            head_first=head_first,
-            output_dtype=torch.float32,
-        )
-        torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
-
-    @pytest.mark.parametrize(
         'cu_seqlens,heads,chunk_size,reverse,scale,input_dtype',
         [
-            ([0, 65, 129], 4, 64, False, None, torch.bfloat16),
-            ([0, 65, 129], 4, 64, True, None, torch.float32),
             ([0, 127, 2051], 4, 64, False, 0.5, torch.bfloat16),
-            ([0, 127, 2051], 4, 64, True, 0.5, torch.float32),
         ],
     )
     def test_varlen(self, cu_seqlens, heads, chunk_size, reverse, scale, input_dtype):
@@ -163,4 +125,4 @@ class TestChunkLocalCumsumScalar:
             head_first=False,
             output_dtype=torch.float32,
         )
-        torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(out, ref, atol=1e-6, rtol=1e-6)

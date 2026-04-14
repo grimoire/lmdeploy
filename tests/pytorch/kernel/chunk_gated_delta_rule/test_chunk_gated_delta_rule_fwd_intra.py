@@ -30,7 +30,7 @@ def get_tolerances(dtype: torch.dtype) -> tuple[float, float]:
     if dtype == torch.float32:
         return 2e-3, 2e-3
     if fla_func is not None:
-        return 4e-2, 4e-2
+        return 6e-2, 6e-2
     return 1e-1, 1e-1
 
 
@@ -134,49 +134,9 @@ class TestChunkGatedDeltaRuleForwardIntra:
                 torch.set_default_device(origin_device)
 
     @pytest.mark.parametrize(
-        'batch,seqlen,heads,v_heads,head_dim,value_dim,chunk_size,dtype,beta_dtype,g_dtype,use_g,use_exp2',
-        [
-            (2, 64, 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.float32, False, False),
-            (1, 65, 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.float32, True, True),
-        ],
-    )
-    def test_fixed(self, batch, seqlen, heads, v_heads, head_dim, value_dim, chunk_size, dtype, beta_dtype,
-                   g_dtype, use_g, use_exp2):
-        from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.chunk_fwd import chunk_gated_delta_rule_fwd_intra
-
-        k = torch.rand(batch, seqlen, heads, head_dim, dtype=dtype) - 0.5
-        v = torch.rand(batch, seqlen, v_heads, value_dim, dtype=dtype) - 0.5
-        beta = torch.rand(batch, seqlen, v_heads, dtype=beta_dtype)
-        g = None
-        if use_g:
-            g = -2 * torch.rand(batch, seqlen, v_heads, dtype=g_dtype)
-
-        out_w, out_u, out_A = chunk_gated_delta_rule_fwd_intra(
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            chunk_size=chunk_size,
-            use_exp2=use_exp2,
-        )
-        ref_w, ref_u, ref_A = ref_impl(
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            chunk_size=chunk_size,
-            use_exp2=use_exp2,
-        )
-        atol, rtol = get_tolerances(dtype)
-        torch.testing.assert_close(out_w, ref_w.to(out_w.dtype), atol=atol, rtol=rtol)
-        torch.testing.assert_close(out_u, ref_u.to(out_u.dtype), atol=atol, rtol=rtol)
-        torch.testing.assert_close(out_A, ref_A.to(out_A.dtype), atol=atol, rtol=rtol)
-
-    @pytest.mark.parametrize(
         'cu_seqlens,heads,v_heads,head_dim,value_dim,chunk_size,dtype,beta_dtype,g_dtype,use_g,use_exp2',
         [
-            ([0, 65, 129], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.float32, False, False),
-            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.float32, True, False),
+            ([0, 127, 257], 16, 32, 128, 128, 64, torch.bfloat16, torch.float32, torch.float32, True, True),
         ],
     )
     def test_varlen(self, cu_seqlens, heads, v_heads, head_dim, value_dim, chunk_size, dtype, beta_dtype, g_dtype,

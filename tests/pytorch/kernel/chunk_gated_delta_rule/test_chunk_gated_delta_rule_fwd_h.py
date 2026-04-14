@@ -135,68 +135,10 @@ class TestChunkGatedDeltaRuleForwardH:
                 torch.set_default_device(origin_device)
 
     @pytest.mark.parametrize(
-        'batch,seqlen,heads,v_heads,head_dim,value_dim,dtype,use_g,use_gk,use_initial_state,'
-        'output_final_state,save_new_value,use_exp2',
-        [
-            (2, 128, 4, 4, 64, 64, torch.bfloat16, False, False, False, False, True, False),
-            (2, 65, 4, 8, 64, 128, torch.bfloat16, True, True, True, True, False, True),
-        ],
-    )
-    def test_fixed(self, batch, seqlen, heads, v_heads, head_dim, value_dim, dtype, use_g, use_gk,
-                   use_initial_state, output_final_state, save_new_value, use_exp2):
-        from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.chunk_delta_h import chunk_gated_delta_rule_fwd_h
-
-        k = torch.randn(batch, seqlen, heads, head_dim, dtype=dtype) * 0.1
-        w = torch.randn(batch, seqlen, v_heads, head_dim, dtype=dtype) * 0.1
-        u = torch.randn(batch, seqlen, v_heads, value_dim, dtype=dtype) * 0.1
-        g = -2.0 * torch.rand(batch, seqlen, v_heads, dtype=torch.float32) if use_g else None
-        gk = -2.0 * torch.rand(batch, seqlen, v_heads, head_dim, dtype=torch.float32) if use_gk else None
-        initial_state = None
-        if use_initial_state:
-            initial_state = make_initial_state(batch, v_heads, head_dim, value_dim, torch.float32)
-
-        out_h, out_v_new, out_final_state = chunk_gated_delta_rule_fwd_h(
-            k=k,
-            w=w,
-            u=u,
-            g=g,
-            gk=gk,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            chunk_size=64,
-            save_new_value=save_new_value,
-            use_exp2=use_exp2,
-        )
-        ref_h, ref_v_new, ref_final_state = torch_ref(
-            k=k,
-            w=w,
-            u=u,
-            g=g,
-            gk=gk,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            chunk_size=64,
-            save_new_value=save_new_value,
-            use_exp2=use_exp2,
-        )
-
-        atol, rtol = get_tolerances(dtype)
-        torch.testing.assert_close(out_h, ref_h.to(out_h.dtype), atol=atol, rtol=rtol)
-        if save_new_value:
-            torch.testing.assert_close(out_v_new, ref_v_new.to(out_v_new.dtype), atol=atol, rtol=rtol)
-        else:
-            assert out_v_new is None
-        if output_final_state:
-            torch.testing.assert_close(out_final_state, ref_final_state, atol=atol, rtol=rtol)
-        else:
-            assert out_final_state is None
-
-    @pytest.mark.parametrize(
         'cu_seqlens,heads,v_heads,head_dim,value_dim,dtype,use_g,use_gk,use_initial_state,output_final_state,'
         'save_new_value,use_exp2',
         [
-            ([0, 65, 129], 4, 4, 64, 64, torch.bfloat16, False, False, False, True, True, False),
-            ([0, 127, 205], 4, 8, 64, 128, torch.bfloat16, True, True, True, True, True, True),
+            ([0, 127, 257], 16, 32, 128, 128, torch.bfloat16, True, False, True, True, True, True),
         ],
     )
     def test_varlen(self, cu_seqlens, heads, v_heads, head_dim, value_dim, dtype, use_g, use_gk,

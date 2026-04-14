@@ -11,12 +11,6 @@ from .wy_fast import recompute_w_u_fwd
 
 
 @T.macro
-def _clear_block(dst: T.Buffer, BC: int) -> None:
-    for i, j in T.Parallel(BC, BC):
-        dst[i, j] = 0.0
-
-
-@T.macro
 def _load_k_block(dst: T.Buffer,
                   K_in: T.Buffer,
                   batch_id,

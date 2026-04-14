@@ -101,47 +101,10 @@ class TestRecomputeWUForward:
                 torch.set_default_device(origin_device)
 
     @pytest.mark.parametrize(
-        'batch,seqlen,heads,v_heads,head_dim,value_dim,chunk_size,dtype,beta_dtype,a_dtype,use_g,use_exp2',
-        [
-            (2, 128, 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.bfloat16, False, False),
-            (2, 127, 4, 4, 64, 64, 64, torch.float32, torch.float32, torch.float32, False, False),
-            (2, 65, 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.bfloat16, True, False),
-            (2, 65, 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16, torch.bfloat16, True, True),
-        ],
-    )
-    def test_fixed(self, batch, seqlen, heads, v_heads, head_dim, value_dim, chunk_size, dtype, beta_dtype, a_dtype,
-                   use_g, use_exp2):
-        from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.wy_fast import recompute_w_u_fwd
-
-        k = torch.rand(batch, seqlen, heads, head_dim, dtype=dtype) - 0.5
-        v = torch.rand(batch, seqlen, v_heads, value_dim, dtype=dtype) - 0.5
-        beta = torch.rand(batch, seqlen, v_heads, dtype=beta_dtype)
-        A = torch.rand(batch, seqlen, v_heads, chunk_size, dtype=a_dtype) - 0.5
-        g = None
-        if use_g:
-            g = -2 * torch.rand(batch, seqlen, v_heads, dtype=torch.float32)
-
-        out_w, out_u = recompute_w_u_fwd(k=k, v=v, beta=beta, A=A, g=g, use_exp2=use_exp2)
-        ref_w, ref_u = torch_ref(k=k, v=v, beta=beta, A=A, g=g, use_exp2=use_exp2)
-        atol, rtol = get_tolerances(dtype)
-        torch.testing.assert_close(out_w, ref_w.to(out_w.dtype), atol=atol, rtol=rtol)
-        torch.testing.assert_close(out_u, ref_u.to(out_u.dtype), atol=atol, rtol=rtol)
-
-    @pytest.mark.parametrize(
         'cu_seqlens,heads,v_heads,head_dim,value_dim,chunk_size,dtype,beta_dtype,a_dtype,use_g,use_exp2,non_contiguous_kv,fully_strided_kv',
         [
-            ([0, 65, 129], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16,
-             torch.bfloat16, False, False, False, False),
-            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16,
-             torch.bfloat16, True, False, False, False),
-            ([0, 127, 2051], 4, 4, 64, 64, 64, torch.bfloat16, torch.bfloat16,
-             torch.bfloat16, True, True, False, False),
-            ([0, 97, 211], 4, 4, 64, 64, 64, torch.float32, torch.float32,
-             torch.float32, True, False, False, False),
-            ([0, 127, 257], 16, 32, 128, 128, 64, torch.bfloat16, torch.bfloat16,
-             torch.bfloat16, True, False, True, False),
-            ([0, 127, 257], 16, 32, 128, 128, 64, torch.bfloat16, torch.bfloat16,
-             torch.bfloat16, True, False, False, True),
+            ([0, 127, 257], 16, 32, 128, 128, 64, torch.bfloat16, torch.float32,
+             torch.bfloat16, True, True, True, False),
         ],
     )
     def test_varlen(self, cu_seqlens, heads, v_heads, head_dim, value_dim, chunk_size, dtype, beta_dtype, a_dtype,

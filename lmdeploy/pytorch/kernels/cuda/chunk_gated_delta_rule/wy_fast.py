@@ -76,13 +76,13 @@ def recompute_w_u_fwd_kernel(H: int,
                 else:
                     b_A[i, j] = T.cast(0.0, a_dtype)
 
-            b_bd = T.alloc_shared((BT,), dtype=dtype)
+            b_bd = T.alloc_shared((BT,), dtype=beta_dtype)
             for i in T.Parallel(BT):
                 idx = bos + i_t * BT + i
                 b_bd[i] = T.if_then_else(
                     i_t * BT + i < seqlen,
-                    T.cast(Beta[i_b, idx, i_h], dtype),
-                    T.cast(0.0, dtype),
+                    Beta[i_b, idx, i_h],
+                    T.cast(0.0, beta_dtype),
                 )
 
             for i_v in T.Pipelined(NV, num_stages=num_stages_v):
@@ -91,7 +91,7 @@ def recompute_w_u_fwd_kernel(H: int,
                     row_offset = i_t * BT + i
                     v_idx = i_v * BV + j
                     if row_offset < seqlen and v_idx < V:
-                        b_vb[i, j] = V_in[i_b, bos + row_offset, i_h, v_idx] * b_bd[i]
+                        b_vb[i, j] = T.cast(V_in[i_b, bos + row_offset, i_h, v_idx] * b_bd[i], dtype)
                     else:
                         b_vb[i, j] = T.cast(0.0, dtype)
 

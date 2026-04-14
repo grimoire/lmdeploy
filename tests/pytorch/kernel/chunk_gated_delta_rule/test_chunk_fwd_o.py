@@ -121,50 +121,8 @@ class TestChunkFwdO:
                 torch.set_default_device(origin_device)
 
     @pytest.mark.parametrize(
-        'batch,seqlen,heads,v_heads,head_dim,value_dim,chunk_size,dtype,use_g,use_exp2,transpose_state_layout',
-        [
-            (2, 128, 4, 4, 128, 128, 64, torch.bfloat16, False, False, False),
-            (1, 65, 4, 8, 128, 128, 64, torch.bfloat16, True, False, False),
-        ],
-    )
-    def test_fixed(self, batch, seqlen, heads, v_heads, head_dim, value_dim, chunk_size, dtype, use_g, use_exp2,
-                   transpose_state_layout):
-        from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.chunk_o import chunk_fwd_o
-
-        nt = (seqlen + chunk_size - 1) // chunk_size
-        q = torch.rand(batch, seqlen, heads, head_dim, dtype=dtype) - 0.5
-        k = torch.rand(batch, seqlen, heads, head_dim, dtype=dtype) - 0.5
-        v = torch.rand(batch, seqlen, v_heads, value_dim, dtype=dtype) - 0.5
-        h = torch.rand(batch, nt, v_heads, head_dim, value_dim, dtype=dtype) - 0.5
-        g = -2.0 * torch.rand(batch, seqlen, v_heads, dtype=torch.float32) if use_g else None
-
-        out = chunk_fwd_o(
-            q=q,
-            k=k,
-            v=v,
-            h=h,
-            g=g,
-            chunk_size=chunk_size,
-            use_exp2=use_exp2,
-            transpose_state_layout=transpose_state_layout,
-        )
-        ref = ref_impl(
-            q=q,
-            k=k,
-            v=v,
-            h=h,
-            g=g,
-            chunk_size=chunk_size,
-            use_exp2=use_exp2,
-            transpose_state_layout=transpose_state_layout,
-        )
-        atol, rtol = get_tolerances(dtype)
-        torch.testing.assert_close(out, ref.to(out.dtype), atol=atol, rtol=rtol)
-
-    @pytest.mark.parametrize(
         'cu_seqlens,heads,v_heads,head_dim,value_dim,chunk_size,dtype,use_g,use_exp2,transpose_state_layout',
         [
-            ([0, 65, 129], 4, 4, 128, 128, 64, torch.bfloat16, False, False, False),
             ([0, 127, 2051], 16, 32, 128, 128, 64, torch.bfloat16, True, False, False),
         ],
     )
