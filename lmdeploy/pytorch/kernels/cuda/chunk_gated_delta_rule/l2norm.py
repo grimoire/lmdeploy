@@ -83,8 +83,6 @@ def l2norm_fwd(
 
     kernel = l2norm_fwd_kernel(D=D, eps=eps, dtype=x.dtype, output_dtype=out.dtype)
     kernel(x, out)
-    from lmdeploy.pytorch.tools.utils import dump_tilelang_source
-    dump_tilelang_source(kernel, "/nvme1/yaoqian/space/tmp/lmdeploy_test/develop/chunk_gdr/src/tvm_kernel.cu")
 
     out = out.view(x_shape)
     return out
