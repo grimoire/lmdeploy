@@ -7,6 +7,7 @@ from fla.ops.utils.index import prepare_chunk_indices
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_fwd import chunk_gated_delta_rule_fwd_intra
 from .chunk_o import chunk_fwd_o
+from .l2norm import l2norm_fwd
 from .utils import chunk_local_cumsum
 
 RCP_LN2 = 1.4426950216
@@ -136,8 +137,8 @@ def chunk_gated_delta_rule(
     dt_bias = None
 
     if use_qk_l2norm_in_kernel:
-        q = torch.nn.functional.normalize(q, p=2, dim=-1)
-        k = torch.nn.functional.normalize(k, p=2, dim=-1)
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
 
     # TODO: avoid using `prepare_chunk_indices` and `prepare_chunk_offsets` in chunk gated delta kernel
     chunk_indices = prepare_chunk_indices(

@@ -228,8 +228,6 @@ def recompute_w_u_fwd(
         use_exp2=use_exp2,
         is_varlen=cu_seqlens is not None,
     )
-    from lmdeploy.pytorch.tools.utils import dump_tilelang_source
-    dump_tilelang_source(kernel, '/nvme1/yaoqian/space/tmp/lmdeploy_test/develop/chunk_gdr/src/tvm_kernel.cu')
     kernel(
         k,
         v,

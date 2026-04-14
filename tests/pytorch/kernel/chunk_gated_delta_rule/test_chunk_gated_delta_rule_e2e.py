@@ -47,13 +47,14 @@ class TestChunkGatedDeltaRuleE2E:
                 torch.set_default_device(origin_device)
 
     @pytest.mark.parametrize(
-        'cu_seqlens,heads,v_heads,head_dim,value_dim,dtype,output_final_state,non_contiguous_kv',
+        'cu_seqlens,heads,v_heads,head_dim,value_dim,dtype,output_final_state,non_contiguous_kv,use_qk_l2norm_in_kernel',
         [
-            ([0, 127, 257], 16, 32, 128, 128, torch.bfloat16, True, True),
+            ([0, 127, 257], 16, 32, 128, 128, torch.bfloat16, True, True, False),
+            ([0, 127, 257], 16, 32, 128, 128, torch.bfloat16, True, True, True),
         ],
     )
     def test_varlen(self, cu_seqlens, heads, v_heads, head_dim, value_dim, dtype, output_final_state,
-                    non_contiguous_kv):
+                    non_contiguous_kv, use_qk_l2norm_in_kernel):
         from lmdeploy.pytorch.kernels.cuda.chunk_gated_delta_rule.chunk import chunk_gated_delta_rule
 
         total = cu_seqlens[-1]
@@ -79,6 +80,7 @@ class TestChunkGatedDeltaRuleE2E:
             beta=beta,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
         )
         ref_out, ref_final_state = fla_func(
@@ -89,6 +91,7 @@ class TestChunkGatedDeltaRuleE2E:
             beta=beta,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
         )
 

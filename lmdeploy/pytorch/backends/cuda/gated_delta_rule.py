@@ -165,6 +165,19 @@ class CudaGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             self.chunk_func = chunk_gated_delta_rule
         elif has_fla():
             from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+            # patch l2norm_fwd_kernel autotuning to avoid unwanted specialize.
+            try:
+                # avoid unwanted specialize
+                from fla.modules.l2norm import l2norm_fwd_kernel
+                keys = l2norm_fwd_kernel.fn.keys
+                if 'NB' in keys:
+                    keys.remove('NB')
+            except Exception:
+                from lmdeploy.utils import get_logger
+                logger = get_logger('lmdeploy')
+                logger.debug('patch l2norm_fwd_kernel autotuning failed.')
+
             self.chunk_func = chunk_gated_delta_rule
         else:
             raise ImportError('either lmdeploy chunk kernel (sm>=9.0 with tilelang) or fla is required '
@@ -199,10 +212,6 @@ class CudaGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             batch_state = recurrent_state.index_select(0, state_indices)
             init_state = batch_state
 
-        if use_qk_l2norm_in_kernel:
-            # l2norm in fla would recompile when seqlen changed.
-            q = torch.nn.functional.normalize(q, p=2, dim=-1)
-            k = torch.nn.functional.normalize(k, p=2, dim=-1)
         core_attn_out, last_state = self.chunk_func(
             q,
             k,
@@ -212,7 +221,7 @@ class CudaGatedDeltaRuleImpl(GatedDeltaRuleImpl):
             scale=scale,
             initial_state=init_state,
             output_final_state=output_final_state,
-            use_qk_l2norm_in_kernel=False,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             cu_seqlens=cu_seqlens,
         )
         if spec_state_offsets is not None:
