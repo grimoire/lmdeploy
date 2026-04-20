@@ -53,7 +53,8 @@ class ConfigBuilder:
         """Build scheduler config."""
         scheduler_config = SchedulerConfig(max_batches=engine_config.max_batch_size,
                                            max_session_len=engine_config.session_len,
-                                           prefill_interval=engine_config.prefill_interval)
+                                           prefill_interval=engine_config.prefill_interval,
+                                           max_num_batched_tokens=engine_config.max_num_batched_tokens)
         return scheduler_config
 
     @staticmethod

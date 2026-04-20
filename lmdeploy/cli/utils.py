@@ -603,6 +603,14 @@ class ArgumentHelper:
                                    help='the max number of tokens per iteration during prefill')
 
     @staticmethod
+    def max_num_batched_tokens(parser):
+        return parser.add_argument('--max-num-batched-tokens',
+                                   type=int,
+                                   default=0,
+                                   help='the max total token budget for mixed decode+prefill. '
+                                   '0 disables mixed decode+prefill scheduling')
+
+    @staticmethod
     def vision_max_batch_size(parser):
         return parser.add_argument('--vision-max-batch-size', type=int, default=1, help='the vision model batch size')
 

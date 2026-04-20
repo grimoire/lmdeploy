@@ -165,7 +165,7 @@ class Scheduler:
         return migration_ready
 
     @record_function('schedule_prefill')
-    def _schedule_prefill(self, prealloc_size: int = 0):
+    def _schedule_prefill(self, prealloc_size: int = 0, token_budget: int = None):
         """Schedule for prefilling."""
 
         max_batches = self.scheduler_config.max_batches - self.num_ready() - self.num_running()
@@ -175,6 +175,7 @@ class Scheduler:
         copy_map: MapType = dict()
         running: SeqList = []
         token_count = 0
+        token_budget = token_budget or self.cache_config.max_prefill_token_num
 
         def _to_running(seq: SchedulerSequence):
             """To running."""
@@ -203,7 +204,7 @@ class Scheduler:
         while len(waiting) > 0 and len(running) < max_batches:
             seq = waiting.pop(0)
 
-            if (len(running) > 0 and token_count + seq.num_token_ids > self.cache_config.max_prefill_token_num):
+            if (len(running) > 0 and token_count + seq.num_token_ids > token_budget):
                 break
 
             self.block_trie.match(seq)
@@ -276,10 +277,75 @@ class Scheduler:
 
         return self.ready[:self.scheduler_config.max_batches], swap_in_map, swap_out_map, copy_map
 
-    def schedule(self, is_prefill: bool, prealloc_size: int = 0):
+    @record_function('schedule_mixed_prefill')
+    def schedule_mixed_prefill(self, max_batches: int, token_budget: int, prealloc_size: int = 0):
+        """Schedule waiting prefill sequences for a mixed decode+prefill step.
+
+        ``max_batches`` and ``token_budget`` are the remaining row and token
+        budgets after decode rows have already been selected.
+        """
+
+        eviction_helper = self.eviction_helper
+        swap_out_map: MapType = dict()
+        swap_in_map: MapType = dict()
+        copy_map: MapType = dict()
+        running: SeqList = []
+        token_count = 0
+
+        def _to_running(seq: SchedulerSequence, token_cost: int):
+            """To running."""
+            seq.state.activate()
+            running.append(seq)
+            nonlocal token_count
+            token_count += token_cost
+
+        def __evict_for_seq(seq: SchedulerSequence, waiting):
+            """Evict until can append."""
+            from itertools import chain
+            hanging = reversed(self.hanging)
+            waiting = reversed(waiting)
+            evictable = list(chain(hanging, waiting))
+            return eviction_helper.evict_for_seq(seq, evictable, prealloc_size)
+
+        def _reorder_waiting():
+            """Reorder waiting."""
+            return sorted(self.waiting, key=lambda seq: seq.arrive_time)
+
+        if max_batches <= 0 or token_budget <= 0 or not self.has_waiting():
+            return SchedulerOutput(running=running,
+                                   swap_in_map=swap_in_map,
+                                   swap_out_map=swap_out_map,
+                                   copy_map=copy_map)
+
+        waiting = _reorder_waiting()
+        while len(waiting) > 0 and len(running) < max_batches:
+            seq = waiting.pop(0)
+            token_cost = min(seq.num_token_ids, token_budget)
+            if token_cost <= 0:
+                break
+            if len(running) > 0 and token_count + token_cost > token_budget:
+                break
+
+            self.block_trie.match(seq)
+
+            if not __evict_for_seq(seq, waiting):
+                break
+
+            # allocate session memory
+            self.block_manager.allocate(seq, prealloc_size)
+            self.block_trie.allocate(seq)
+            if self.is_ssm:
+                self.state_manager.allocate(seq)
+            _to_running(seq, token_cost)
+
+            seq.record_event(EventType.SCHEDULED)
+
+        return SchedulerOutput(running=running, swap_in_map=swap_in_map, swap_out_map=swap_out_map, copy_map=copy_map)
+
+    def schedule(self, is_prefill: bool, prealloc_size: int = 0, token_budget: int = None):
         """Schedule inputs for next steps."""
         if is_prefill:
-            output = self._schedule_prefill(prealloc_size)
+            output = self._schedule_prefill(prealloc_size, token_budget=token_budget)
         else:
             output = self._schedule_decoding(prealloc_size)
         running, swap_in_map, swap_out_map, copy_map = output

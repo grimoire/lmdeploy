@@ -83,6 +83,7 @@ class SchedulerConfig:
     max_request_output_len: int = 512
     eviction_type: str = 'recompute'
     prefill_interval: int = 16
+    max_num_batched_tokens: int = 0
     max_active_adapters: int = 64
 
 

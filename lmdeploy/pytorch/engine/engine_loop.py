@@ -251,7 +251,8 @@ class EngineLoop:
         logits = batched_outputs.logits
         all_routed_experts = batched_outputs.all_routed_experts
 
-        if model_inputs is not None and (model_inputs.is_chunk and not model_inputs.is_last_chunk):
+        if (model_inputs is not None and not model_inputs.is_mixed
+                and (model_inputs.is_chunk and not model_inputs.is_last_chunk)):
             # chunk long context does not need to update seqs and outputs
             seq = running[0]
             seq.append_routed_experts(all_routed_experts)
@@ -263,7 +264,12 @@ class EngineLoop:
 
         all_logprobs = __get_logprobs(batched_outputs)
 
-        seq_length = [seq.num_token_ids for seq in running]
+        if model_inputs is not None and model_inputs.is_mixed:
+            seq_length = model_inputs.mixed_seq_length.tolist()
+            mixed_is_intermediate = (model_inputs.mixed_is_chunk & ~model_inputs.mixed_is_last_chunk).tolist()
+        else:
+            seq_length = [seq.num_token_ids for seq in running]
+            mixed_is_intermediate = [False] * len(running)
         is_run = [seq.status == MessageStatus.RUNNING for seq in running]
         self.seq_strategy.update_running(running=running,
                                          batched_outputs=batched_outputs,
@@ -272,8 +278,16 @@ class EngineLoop:
 
         # generate output
         outputs: dict[int, InferOutput] = dict()
+        split_logits = None
+        if logits is not None and model_inputs is not None and model_inputs.is_mixed:
+            split_logits = logits.split(seq_length)
+
         for idx, msg in enumerate(running):
             if not is_run[idx]:
+                continue
+            if mixed_is_intermediate[idx]:
+                if split_logits is not None:
+                    msg.append_logits(split_logits[idx])
                 continue
             token_ids = msg.generated_ids
             finish = msg.status == MessageStatus.STOPPED or msg.status == MessageStatus.TO_BE_MIGRATED

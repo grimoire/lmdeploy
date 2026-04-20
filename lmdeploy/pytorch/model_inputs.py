@@ -197,6 +197,13 @@ class ModelInputs:
     is_first_chunk: bool = False
     is_last_chunk: bool = False
     is_chunk_multimodal: bool = False
+    is_mixed: bool = False
+    mixed_decode_count: int = 0
+    mixed_prefill_count: int = 0
+    mixed_seq_length: torch.Tensor | None = None
+    mixed_is_decode: torch.Tensor | None = None
+    mixed_is_chunk: torch.Tensor | None = None
+    mixed_is_last_chunk: torch.Tensor | None = None
     # mrope, shape(3, sum_seqlens)
     mrope_pos_ids: torch.Tensor | None = None
 
@@ -244,7 +251,8 @@ class ModelInputs:
     def log_info(self):
         """Get log info."""
         ret = (f'num_tokens={self.input_ids.numel()}, batch_size={self.seq_length.numel()}'
-               f', is_decoding={self.is_decoding}, has_vision={self.vision_inputs is not None}')
+               f', is_decoding={self.is_decoding}, has_vision={self.vision_inputs is not None}'
+               f', is_mixed={self.is_mixed}')
         return ret
 
     def clone(self, **kwargs):

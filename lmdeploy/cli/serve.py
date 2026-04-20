@@ -117,6 +117,7 @@ class SubCliServe:
         cache_block_seq_len_act = ArgumentHelper.cache_block_seq_len(pt_group)
         prefix_caching_act = ArgumentHelper.enable_prefix_caching(pt_group)
         max_prefill_token_num_act = ArgumentHelper.max_prefill_token_num(pt_group)
+        ArgumentHelper.max_num_batched_tokens(pt_group)
         quant_policy = ArgumentHelper.quant_policy(pt_group)
         model_format = ArgumentHelper.model_format(pt_group)
         hf_overrides = ArgumentHelper.hf_overrides(pt_group)
@@ -235,6 +236,7 @@ class SubCliServe:
                 quant_policy=args.quant_policy,
                 eager_mode=args.eager_mode,
                 max_prefill_token_num=args.max_prefill_token_num,
+                max_num_batched_tokens=args.max_num_batched_tokens,
                 enable_microbatch=args.enable_microbatch,
                 enable_eplb=args.enable_eplb,
                 enable_metrics=not args.disable_metrics,

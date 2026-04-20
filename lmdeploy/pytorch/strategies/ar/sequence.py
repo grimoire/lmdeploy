@@ -123,20 +123,37 @@ class ARSequenceStrategy(SequenceStrategy):
         if model_inputs is None:
             num_tokens = delta.seq_length.tolist()
             is_decoding = delta.is_decoding
+            mixed_is_decode = None
+            mixed_is_intermediate = None
+        elif model_inputs.is_mixed:
+            num_tokens = model_inputs.mixed_seq_length.tolist()
+            is_decoding = False
+            mixed_is_decode = model_inputs.mixed_is_decode.tolist()
+            mixed_is_intermediate = (model_inputs.mixed_is_chunk & ~model_inputs.mixed_is_last_chunk).tolist()
         else:
             num_tokens = model_inputs.seq_length.tolist()
             is_decoding = model_inputs.is_decoding
+            mixed_is_decode = None
+            mixed_is_intermediate = None
         all_routed_experts = [None] * len(num_tokens)
         if batched_outputs.all_routed_experts is not None:
             all_routed_experts = batched_outputs.all_routed_experts.split(num_tokens, dim=0)
             all_routed_experts = [experts.numpy() for experts in all_routed_experts]
         update_mode = UpdateTokenMode.DECODE if is_decoding else UpdateTokenMode.PREFILL
-        for token, msg, stop, model_meta, routed_experts in zip(next_token_ids, running, stopped, model_metas,
-                                                                all_routed_experts):
+        for idx, (token, msg, stop, model_meta, routed_experts) in enumerate(
+                zip(next_token_ids, running, stopped, model_metas, all_routed_experts)):
             if msg.status != MessageStatus.RUNNING:
                 continue
 
+            if mixed_is_intermediate is not None and mixed_is_intermediate[idx]:
+                msg.append_routed_experts(routed_experts)
+                continue
+
+            cur_update_mode = update_mode
+            if mixed_is_decode is not None:
+                cur_update_mode = UpdateTokenMode.DECODE if mixed_is_decode[idx] else UpdateTokenMode.PREFILL
+
             # fill token
-            msg.update_token_ids(token, model_meta=model_meta, mode=update_mode, routed_experts=routed_experts)
+            msg.update_token_ids(token, model_meta=model_meta, mode=cur_update_mode, routed_experts=routed_experts)
             if stop:
                 msg.state.finish()

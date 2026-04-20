@@ -352,6 +352,8 @@ class PytorchEngineConfig:
             would be allocate according to current environment.
         adapters: The path configs to lora adapters.
         max_prefill_token_num: tokens per iteration.
+        max_num_batched_tokens: total token budget for mixed decode+prefill.
+            Default 0, which disables mixed decode+prefill scheduling.
         thread_safe: thread safe engine instance.
         enable_prefix_caching: Enable token match and sharing caches.
         device_type: The inference device type, options ['cuda']
@@ -411,6 +413,7 @@ class PytorchEngineConfig:
     num_gpu_blocks: int = 0
     adapters: dict[str, str] = None
     max_prefill_token_num: int = 4096
+    max_num_batched_tokens: int = 0
     thread_safe: bool = False
     enable_prefix_caching: bool = False
     device_type: str = 'cuda'
@@ -456,6 +459,8 @@ class PytorchEngineConfig:
         assert self.num_cpu_blocks >= 0, 'invalid num_cpu_blocks'
         assert self.max_prefill_token_num >= 0, \
             'invalid max_prefill_token_num'
+        assert self.max_num_batched_tokens >= 0, \
+            'invalid max_num_batched_tokens'
         assert self.num_gpu_blocks >= 0, 'invalid num_gpu_blocks'
         assert self.quant_policy in (QuantPolicy.NONE, QuantPolicy.INT4, QuantPolicy.INT8, QuantPolicy.TURBO_QUANT), \
                'invalid quant_policy'

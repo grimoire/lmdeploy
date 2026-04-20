@@ -49,12 +49,15 @@ class InputsMakerConfig:
     """
     max_batches: int
     max_prefill_token_num: int
+    max_num_batched_tokens: int
+    prefill_interval: int
     role: EngineRole
     is_ssm: bool = False
     dp: int = 1
     spec_decoding: bool = False
     enable_chunked_prefill: bool = False
     use_mrope: bool = False
+    model_paradigm: str = 'ar'
 
     @staticmethod
     def from_engine(engine: 'Engine'):
@@ -64,11 +67,14 @@ class InputsMakerConfig:
             spec_decoding=engine.specdecode_config is not None,
             max_batches=cache_config.max_batches,
             max_prefill_token_num=cache_config.max_prefill_token_num,
+            max_num_batched_tokens=engine.scheduler_config.max_num_batched_tokens,
+            prefill_interval=engine.scheduler_config.prefill_interval,
             role=cache_config.role,
             is_ssm=len(cache_config.states_shapes) > 0,
             dp=engine.dist_config.dp,
             enable_chunked_prefill=engine.misc_config.enable_chunked_prefill,
             use_mrope=model_config.use_mrope,
+            model_paradigm=model_config.model_paradigm,
         )
 
 
@@ -125,13 +131,16 @@ class LongContextChunker:
         for modal_type, data in multimodal_data:
             yield modal_type, data
 
-    def next_chunk_size(self):
+    def next_chunk_size(self, max_chunk_size: int | None = None):
         """Get chunk size."""
         seq = self.seq
         if seq is None:
             return 0, None
 
-        llm_chunk_size = min(seq.num_token_ids, self.max_prefill_num)
+        max_prefill_num = self.max_prefill_num
+        if max_chunk_size is not None:
+            max_prefill_num = min(max_prefill_num, max_chunk_size)
+        llm_chunk_size = min(seq.num_token_ids, max_prefill_num)
 
         if len(self.multimodals) == 0:
             # no vlm inputs found
@@ -158,10 +167,12 @@ class LongContextChunker:
 
         return end - start, out_multimodals
 
-    def is_last_chunk(self):
+    def is_last_chunk(self, chunk_size: int | None = None):
         """Is last chunk."""
         if self.seq is None:
             return True
+        if chunk_size is not None:
+            return self.seq.num_token_ids <= chunk_size
         return self.seq.num_token_ids <= self.max_prefill_num
 
     def clear(self):
@@ -176,11 +187,11 @@ class LongContextChunker:
         """Step chunker."""
         if self.seq is None:
             return
-        if self.is_last_chunk():
+        if inputs.is_last_chunk:
             # last chunk should be treated as normal prefill
             return
         assert inputs.is_chunk
-        chunk_size = inputs.max_q_seqlen
+        chunk_size = inputs.seq_length.max().item()
         self.next_step += chunk_size
         self.seq.set_step(self.next_step)
 
@@ -236,6 +247,9 @@ class InputsMakerAsync:
 
         # long context chunker
         self.long_context_chunker = LongContextChunker(config.max_prefill_token_num)
+
+        # starvation protection for mixed decode+prefill
+        self.less_prefill_waiting = 0
 
     def _init_do_prefill(self, config: InputsMakerConfig):
         if config.role == EngineRole.Prefill:
@@ -580,6 +594,18 @@ class InputsMakerAsync:
             return
 
         is_decoding = inputs is None
+        if inputs is not None and inputs.is_mixed:
+            decode_count = inputs.mixed_decode_count
+            decode_running = running[:decode_count]
+            prefill_running = running[decode_count:]
+            prefill_is_intermediate = bool(inputs.is_chunk and not inputs.is_last_chunk)
+            if self.long_context_chunker.enabled() and prefill_is_intermediate:
+                self.long_context_chunker.update_step(inputs)
+                self.running_seqs = decode_running
+            else:
+                self.running_seqs = decode_running + prefill_running
+            return
+
         if self.long_context_chunker.enabled() and not is_decoding:
             # long context chunk does not need to update running seqs
             self.long_context_chunker.update_step(inputs)
@@ -601,6 +627,140 @@ class InputsMakerAsync:
         # ready to waiting
         scheduler.evict_seqs(to_evict_seqs)
         self.to_evict_seqs.clear()
+
+    def _enable_mixed_decode_prefill(self):
+        """Whether mixed decode+prefill scheduling can be used."""
+        config = self.config
+        return (config.max_num_batched_tokens > 0 and config.role == EngineRole.Hybrid and config.dp == 1
+                and not config.spec_decoding and not config.is_ssm and config.model_paradigm == 'ar')
+
+    def _mixed_prefill_min_tokens(self):
+        """Minimum useful prefill tokens for an uncaptured mixed forward."""
+        budget = self.config.max_num_batched_tokens
+        return min(self.config.max_prefill_token_num, max(128, budget // 16))
+
+    @staticmethod
+    def _seq_has_multimodal(seq: 'SchedulerSequence'):
+        """Whether a sequence carries multimodal data that should stay
+        standalone."""
+        return len(seq.history_embeddings) > 0 or not seq.history_multimodals.empty()
+
+    def _first_waiting_seq(self):
+        """Get the earliest waiting sequence."""
+        if not self.scheduler.has_waiting():
+            return None
+        waiting = sorted(self.scheduler.waiting, key=lambda seq: seq.arrive_time)
+        return waiting[0] if len(waiting) > 0 else None
+
+    def _has_long_prefill_work(self):
+        """Whether there is chunked prefill work that may be mixed with
+        decode."""
+        if self.long_context_chunker.enabled():
+            return True
+        seq = self._first_waiting_seq()
+        return seq is not None and self.long_context_chunker.is_long_context(seq)
+
+    def _set_mixed_inputs(self, inputs: ModelInputs, delta: ModelInputsDelta, decode_count: int,
+                          prefill_count: int):
+        """Annotate prefill inputs with mixed-batch metadata."""
+        decode_seq_length = delta.seq_length
+        mixed_seq_length = torch.cat([decode_seq_length, inputs.seq_length], dim=0)
+        mixed_is_decode = torch.tensor([True] * decode_count + [False] * prefill_count, dtype=torch.bool)
+        prefill_is_chunk = [inputs.is_chunk] * prefill_count
+        prefill_is_last_chunk = [inputs.is_last_chunk if inputs.is_chunk else True] * prefill_count
+        mixed_is_chunk = torch.tensor([False] * decode_count + prefill_is_chunk, dtype=torch.bool)
+        mixed_is_last_chunk = torch.tensor([True] * decode_count + prefill_is_last_chunk, dtype=torch.bool)
+
+        inputs.is_mixed = True
+        inputs.mixed_decode_count = decode_count
+        inputs.mixed_prefill_count = prefill_count
+        inputs.mixed_seq_length = mixed_seq_length
+        inputs.mixed_is_decode = mixed_is_decode
+        inputs.mixed_is_chunk = mixed_is_chunk
+        inputs.mixed_is_last_chunk = mixed_is_last_chunk
+        return inputs
+
+    def _create_mixed_long_context_inputs(self, seq: 'SchedulerSequence', chunk_budget: int, is_first_chunk: bool):
+        """Create prefill inputs for one chunk that will be mixed with decode
+        rows."""
+        chunk_size, multimodals = self.long_context_chunker.next_chunk_size(chunk_budget)
+        inputs = self.create_model_inputs_long_context(seq, chunk_size, multimodals)
+        inputs.is_first_chunk = is_first_chunk
+        inputs.is_last_chunk = self.long_context_chunker.is_last_chunk(chunk_size)
+        inputs.is_chunk_multimodal = self.long_context_chunker.has_multimodal
+        extra_inputs = self.model_agent_strategy.make_extra_inputs([seq], inputs)
+        if inputs.is_last_chunk:
+            self.long_context_chunker.clear()
+        return [seq], inputs, extra_inputs
+
+    def _create_decode_only_forward(self, delta: ModelInputsDelta, running: 'SeqList', invalid_seqs: 'SeqList'):
+        """Create a decode-only forward tuple after decode scheduling has
+        already run."""
+        self.to_evict_seqs = invalid_seqs
+        return running, None, delta, None, {}, {}
+
+    def _create_mixed_forward_inputs(self):
+        """Create mixed decode+prefill inputs when the token budget allows
+        it."""
+        if len(self.running_seqs) == 0:
+            return None
+
+        delta, decode_running, invalid_seqs = self.create_model_inputs_delta()
+        if delta is None or len(decode_running) == 0:
+            return self._create_decode_only_forward(delta, decode_running, invalid_seqs)
+
+        decode_count = len(decode_running)
+        decode_tokens = int(delta.seq_length.sum().item())
+        remaining_budget = self.config.max_num_batched_tokens - decode_tokens
+        if not self._has_long_prefill_work():
+            self.less_prefill_waiting = 0
+            return self._create_decode_only_forward(delta, decode_running, invalid_seqs)
+
+        min_tokens = self._mixed_prefill_min_tokens()
+        if remaining_budget < min_tokens:
+            self.less_prefill_waiting += 1
+            return self._create_decode_only_forward(delta, decode_running, invalid_seqs)
+
+        prefill_running = []
+        inputs = None
+        extra_inputs = None
+        swap_in_map = {}
+        swap_out_map = {}
+
+        if self.long_context_chunker.enabled():
+            seq = self.long_context_chunker.seq
+            if self.long_context_chunker.has_multimodal:
+                self.less_prefill_waiting += 1
+                return self._create_decode_only_forward(delta, decode_running, invalid_seqs)
+            prefill_running, inputs, extra_inputs = self._create_mixed_long_context_inputs(
+                seq, remaining_budget, False)
+        elif self.scheduler.has_waiting():
+            seq = self._first_waiting_seq()
+            if seq is None or self._seq_has_multimodal(seq) or not self.long_context_chunker.is_long_context(seq):
+                self.less_prefill_waiting += 1
+                return self._create_decode_only_forward(delta, decode_running, invalid_seqs)
+
+            prealloc_size = self.engine_strategy.get_prealloc_size(True)
+            scheduler_output = self.scheduler.schedule_mixed_prefill(max_batches=1,
+                                                                     token_budget=remaining_budget,
+                                                                     prealloc_size=prealloc_size)
+            prefill_running = scheduler_output.running
+            swap_in_map = scheduler_output.swap_in_map
+            swap_out_map = scheduler_output.swap_out_map
+            if len(prefill_running) == 1:
+                self.long_context_chunker.set_seq(prefill_running[0])
+                prefill_running, inputs, extra_inputs = self._create_mixed_long_context_inputs(
+                    prefill_running[0], remaining_budget, True)
+
+        if len(prefill_running) == 0 or inputs is None:
+            self.less_prefill_waiting += 1
+            return self._create_decode_only_forward(delta, decode_running, invalid_seqs)
+
+        self.less_prefill_waiting = 0
+        inputs = self._set_mixed_inputs(inputs, delta, decode_count, len(prefill_running))
+        running = decode_running + prefill_running
+        self.to_evict_seqs = invalid_seqs
+        return running, inputs, delta, extra_inputs, swap_in_map, swap_out_map
 
     @torch.inference_mode()
     @record_function('make_forward_inputs')
@@ -651,7 +811,12 @@ class InputsMakerAsync:
                 prealloc_size = 0
             else:
                 prealloc_size = self.engine_strategy.get_prealloc_size(True)
-            scheduler_output = scheduler.schedule(is_prefill=prefill, prealloc_size=prealloc_size)
+            token_budget = None
+            if self._enable_mixed_decode_prefill():
+                token_budget = self.config.max_num_batched_tokens
+            scheduler_output = scheduler.schedule(is_prefill=prefill,
+                                                  prealloc_size=prealloc_size,
+                                                  token_budget=token_budget)
             running = scheduler_output.running
             swap_in_map = scheduler_output.swap_in_map
             swap_out_map = scheduler_output.swap_out_map
@@ -678,11 +843,27 @@ class InputsMakerAsync:
         swap_in_map = {}
         swap_out_map = {}
 
+        running = []
+        extra_inputs = None
+
         self.long_context_chunker.check_enable()
-        if self.long_context_chunker.enabled():
+        has_mixed_output = False
+        if self._enable_mixed_decode_prefill() and not prefill:
+            mixed_output = self._create_mixed_forward_inputs()
+            if mixed_output is not None:
+                (
+                    running,
+                    inputs,
+                    delta,
+                    extra_inputs,
+                    swap_in_map,
+                    swap_out_map,
+                ) = mixed_output
+                has_mixed_output = True
+        if not has_mixed_output and self.long_context_chunker.enabled():
             # long context chunking
             running, inputs, delta, extra_inputs = __create_inputs_long_context_chunk()
-        elif prefill:
+        elif not has_mixed_output and prefill:
             # prefill
             (
                 running,
@@ -694,7 +875,7 @@ class InputsMakerAsync:
             ) = __create_inputs_prefill()
 
         # try decoding
-        if inputs is None and len(self.running_seqs) > 0 and self.config.role != EngineRole.Prefill:
+        if inputs is None and delta is None and len(self.running_seqs) > 0 and self.config.role != EngineRole.Prefill:
             prefill = False
             delta, running, invalid_seqs = self.create_model_inputs_delta()
             self.to_evict_seqs = invalid_seqs
@@ -706,7 +887,11 @@ class InputsMakerAsync:
 
         sampling_inputs = self.sampling_strategy.make_sampling_inputs(running)
         if inputs is not None:
-            stopping_criteria = self.model_agent_strategy.make_stopping_criteria(running)
+            if inputs.is_mixed:
+                stopping_criteria = self.model_agent_strategy.make_stopping_criteria(
+                    running[inputs.mixed_decode_count:])
+            else:
+                stopping_criteria = self.model_agent_strategy.make_stopping_criteria(running)
         else:
             stopping_criteria = None
 
@@ -732,6 +917,12 @@ class InputsMakerAsync:
     def do_prefill_default(self):
         # decoding if no waiting
         scheduler = self.scheduler
+
+        if self._enable_mixed_decode_prefill():
+            if (self._has_long_prefill_work() and len(self.running_seqs) > 0
+                    and self.less_prefill_waiting >= self.config.prefill_interval):
+                self.less_prefill_waiting = 0
+                return True
 
         # do decoding if not waiting
         if not scheduler.has_waiting():

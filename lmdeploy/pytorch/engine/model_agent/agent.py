@@ -668,6 +668,186 @@ class BaseModelAgent:
 
         return inputs, next_token_ids, extra_inputs, extra_outputs
 
+    @staticmethod
+    def _pad_2d_tensor(tensor: torch.Tensor, target_size: int, dim: int = 1, value: int = 0):
+        """Pad a 2-D tensor on the right side of ``dim``."""
+        cur_size = tensor.size(dim)
+        if cur_size >= target_size:
+            return tensor
+        pad_shape = list(tensor.shape)
+        pad_shape[dim] = target_size - cur_size
+        pad = torch.full(pad_shape, value, dtype=tensor.dtype, device=tensor.device)
+        return torch.cat([tensor, pad], dim=dim)
+
+    def _merge_mixed_model_inputs(self, decode_inputs: ModelInputs, prefill_inputs: ModelInputs) -> ModelInputs:
+        """Merge decode rows and prefill rows into one prefill-style
+        forward."""
+        max_blocks = max(decode_inputs.block_offsets.size(1), prefill_inputs.block_offsets.size(1))
+        decode_block_offsets = self._pad_2d_tensor(decode_inputs.block_offsets, max_blocks)
+        prefill_block_offsets = self._pad_2d_tensor(prefill_inputs.block_offsets, max_blocks)
+
+        input_ids = torch.cat([decode_inputs.input_ids, prefill_inputs.input_ids], dim=-1)
+        seq_length = torch.cat([decode_inputs.seq_length, prefill_inputs.seq_length], dim=0)
+        history_lengths = torch.cat([decode_inputs.history_lengths, prefill_inputs.history_lengths], dim=0)
+        block_offsets = torch.cat([decode_block_offsets, prefill_block_offsets], dim=0)
+        num_ignored_history = torch.cat([decode_inputs.num_ignored_history, prefill_inputs.num_ignored_history], dim=0)
+        kv_seqlens = seq_length + history_lengths
+
+        local_adapter_ids = None
+        if decode_inputs.local_adapter_ids is not None and prefill_inputs.local_adapter_ids is not None:
+            local_adapter_ids = torch.cat([decode_inputs.local_adapter_ids, prefill_inputs.local_adapter_ids], dim=0)
+
+        model_metas = None
+        if decode_inputs.model_metas is not None and prefill_inputs.model_metas is not None:
+            model_metas = decode_inputs.model_metas + prefill_inputs.model_metas
+
+        state_offsets = None
+        if decode_inputs.state_offsets is not None and prefill_inputs.state_offsets is not None:
+            state_offsets = torch.cat([decode_inputs.state_offsets, prefill_inputs.state_offsets], dim=0)
+
+        mrope_pos_ids = None
+        if decode_inputs.mrope_pos_ids is not None and prefill_inputs.mrope_pos_ids is not None:
+            mrope_pos_ids = torch.cat([decode_inputs.mrope_pos_ids, prefill_inputs.mrope_pos_ids], dim=1)
+
+        return ModelInputs(
+            input_ids=input_ids,
+            seq_length=seq_length,
+            history_lengths=history_lengths,
+            block_offsets=block_offsets,
+            is_decoding=False,
+            num_ignored_history=num_ignored_history,
+            max_q_seqlen=seq_length.max().item(),
+            max_kv_seqlen=kv_seqlens.max().item(),
+            sum_kv_seqlen=kv_seqlens.sum().item(),
+            local_adapter_ids=local_adapter_ids,
+            model_metas=model_metas,
+            state_offsets=state_offsets,
+            is_mixed=True,
+            mixed_decode_count=prefill_inputs.mixed_decode_count,
+            mixed_prefill_count=prefill_inputs.mixed_prefill_count,
+            mixed_seq_length=prefill_inputs.mixed_seq_length,
+            mixed_is_decode=prefill_inputs.mixed_is_decode,
+            mixed_is_chunk=prefill_inputs.mixed_is_chunk,
+            mixed_is_last_chunk=prefill_inputs.mixed_is_last_chunk,
+            mrope_pos_ids=mrope_pos_ids,
+        )
+
+    @staticmethod
+    def _replace_sampling_prefix(sampling_inputs: SamplingInputs, sampling_delta, decode_count: int):
+        """Replace decode-prefix sampling state with the live StepInputs
+        state."""
+        if sampling_delta is None:
+            return sampling_inputs
+        for key in ('num_ignore_eos', 'random_offsets'):
+            val = getattr(sampling_delta, key, None)
+            cur = getattr(sampling_inputs, key, None)
+            if val is not None and cur is not None:
+                cur = cur.clone()
+                cur[:decode_count] = val
+                setattr(sampling_inputs, key, cur)
+        val = getattr(sampling_delta, 'all_ids', None)
+        cur = getattr(sampling_inputs, 'all_ids', None)
+        if val is not None and cur is not None:
+            max_len = max(cur.size(1), val.size(1))
+            cur = BaseModelAgent._pad_2d_tensor(cur, max_len, dim=1)
+            val = BaseModelAgent._pad_2d_tensor(val, max_len, dim=1)
+            cur[:decode_count] = val
+            sampling_inputs.all_ids = cur
+        return sampling_inputs
+
+    @staticmethod
+    def _slice_batch_obj(obj, start: int, end: int):
+        """Slice dataclass-like batch objects along their first batch
+        dimension."""
+        if obj is None:
+            return None
+        out = dict()
+        for f in fields(obj):
+            val = getattr(obj, f.name)
+            if isinstance(val, torch.Tensor) and val.dim() > 0 and val.size(0) >= end:
+                val = val[start:end]
+            elif isinstance(val, list) and len(val) >= end:
+                val = val[start:end]
+            elif isinstance(val, tuple) and len(val) >= end:
+                val = val[start:end]
+            out[f.name] = val
+        return type(obj)(**out)
+
+    @staticmethod
+    def _slice_metas(model_metas, start: int, end: int):
+        """Slice model metadata lists."""
+        if model_metas is None:
+            return None
+        return model_metas[start:end]
+
+    def _prepare_inputs_mixed(self, prefill_inputs: ModelInputs, delta: ModelInputsDelta,
+                              sampling_inputs: SamplingInputs, prefill_stopping: StoppingCriteria,
+                              prefill_extra_inputs: ExtraInputs):
+        """Prepare one mixed decode+prefill forward."""
+        decode_count = prefill_inputs.mixed_decode_count
+        self.step_inputs.reindex(delta)
+        decode_inputs = self.step_inputs.model_inputs
+        decode_extra_inputs = self.step_inputs.extra_inputs
+        decode_stopping = self.step_inputs.stopping_criteria
+        decode_sampling_delta = self.step_inputs.sampling_delta
+
+        prefill_inputs = self._prepare_inputs_prefill(prefill_inputs, None)
+        sampling_inputs = self._replace_sampling_prefix(sampling_inputs, decode_sampling_delta, decode_count)
+        stopping_criteria = decode_stopping.merge(prefill_stopping)
+        extra_inputs = decode_extra_inputs.merge(prefill_extra_inputs)
+        mixed_inputs = self._merge_mixed_model_inputs(decode_inputs, prefill_inputs)
+        return (mixed_inputs, extra_inputs, stopping_criteria, sampling_inputs, decode_inputs, prefill_inputs,
+                decode_extra_inputs, prefill_extra_inputs)
+
+    def _update_mixed_step_inputs(self, decode_inputs: ModelInputs, prefill_inputs: ModelInputs,
+                                  decode_extra_inputs: ExtraInputs, prefill_extra_inputs: ExtraInputs,
+                                  stopping_criteria: StoppingCriteria, sampling_delta, next_token_ids: torch.Tensor,
+                                  model_metas: Any, extra_outputs: ExtraOutputs):
+        """Split mixed postprocess results back into decode and prefill
+        state."""
+        decode_count = prefill_inputs.mixed_decode_count
+        prefill_count = prefill_inputs.mixed_prefill_count
+        prefill_start = decode_count
+        prefill_end = decode_count + prefill_count
+
+        decode_stopping = self._slice_batch_obj(stopping_criteria, 0, decode_count)
+        decode_sampling_delta = self._slice_batch_obj(sampling_delta, 0, decode_count)
+        decode_extra_outputs = self._slice_batch_obj(extra_outputs, 0, decode_count)
+        decode_model_metas = self._slice_metas(model_metas, 0, decode_count)
+        self.step_inputs.step_decode(
+            decode_inputs,
+            decode_extra_inputs,
+            decode_stopping,
+            decode_sampling_delta,
+            next_token_ids[:decode_count],
+            decode_model_metas,
+            decode_extra_outputs,
+        )
+
+        if prefill_count == 0:
+            return
+
+        prefill_model_metas = self._slice_metas(model_metas, prefill_start, prefill_end)
+        if prefill_inputs.is_chunk and not prefill_inputs.is_last_chunk:
+            self._prev_chunk_output = dict(model_metas=prefill_model_metas)
+            return
+
+        if self.cache_config.role == EngineRole.Prefill:
+            return
+
+        prefill_stopping = self._slice_batch_obj(stopping_criteria, prefill_start, prefill_end)
+        prefill_sampling_delta = self._slice_batch_obj(sampling_delta, prefill_start, prefill_end)
+        prefill_extra_outputs = self._slice_batch_obj(extra_outputs, prefill_start, prefill_end)
+        self.step_inputs.merge_prefill(
+            prefill_inputs,
+            prefill_extra_inputs,
+            prefill_stopping,
+            prefill_sampling_delta,
+            next_token_ids[prefill_start:prefill_end],
+            prefill_model_metas,
+            prefill_extra_outputs,
+        )
+
     async def _async_step(
         self,
         inputs: ModelInputs,
@@ -689,8 +869,31 @@ class BaseModelAgent:
         need_broadcast_next = (tp > 1)
         dp = dist_config.dp
         need_update_inputs = False
+        is_mixed = inputs is not None and inputs.is_mixed
+        mixed_decode_inputs = None
+        mixed_prefill_inputs = None
+        mixed_decode_extra_inputs = None
+        mixed_prefill_extra_inputs = None
 
-        if inputs is None:
+        if is_mixed:
+            assert delta is not None
+            (
+                inputs,
+                extra_inputs,
+                stopping_criteria,
+                sampling_inputs,
+                mixed_decode_inputs,
+                mixed_prefill_inputs,
+                mixed_decode_extra_inputs,
+                mixed_prefill_extra_inputs,
+            ) = self._prepare_inputs_mixed(
+                inputs,
+                delta,
+                sampling_inputs,
+                stopping_criteria,
+                extra_inputs,
+            )
+        elif inputs is None:
             # decoding step, update prev_inputs with delta
             need_update_inputs = True
             assert delta is not None
@@ -794,7 +997,19 @@ class BaseModelAgent:
                 ))
 
         sampling_delta = sampling_inputs.get_delta()
-        if need_update_inputs:
+        if is_mixed:
+            self._update_mixed_step_inputs(
+                mixed_decode_inputs,
+                mixed_prefill_inputs,
+                mixed_decode_extra_inputs,
+                mixed_prefill_extra_inputs,
+                stopping_criteria,
+                sampling_delta,
+                next_token_ids,
+                model_metas,
+                extra_outputs,
+            )
+        elif need_update_inputs:
             self.step_inputs.step_decode(
                 inputs,
                 extra_inputs,

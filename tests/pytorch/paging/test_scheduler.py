@@ -179,3 +179,47 @@ class TestScheduler:
         assert seq1.status == MessageStatus.READY
         assert seq2.status == MessageStatus.WAITING
         assert block_manager.get_num_free_gpu_blocks() == 2
+
+
+    def test_schedule_mixed_prefill_respects_remaining_budget(self, scheduler):
+        session = scheduler.add_session(10)
+        seq1 = session.add_sequence(torch.tensor([0] * 8))
+        seq2 = session.add_sequence(torch.tensor([1] * 12))
+        seq3 = session.add_sequence(torch.tensor([2] * 8))
+
+        output = scheduler.schedule_mixed_prefill(max_batches=4, token_budget=20)
+
+        assert output.running == [seq1, seq2]
+        assert seq1.status == MessageStatus.READY
+        assert seq2.status == MessageStatus.READY
+        assert seq3.status == MessageStatus.WAITING
+
+    def test_schedule_mixed_prefill_allows_first_oversized_request(self, scheduler):
+        session = scheduler.add_session(11)
+        long_seq = session.add_sequence(torch.tensor([0] * 40))
+        next_seq = session.add_sequence(torch.tensor([1] * 8))
+
+        output = scheduler.schedule_mixed_prefill(max_batches=4, token_budget=10)
+
+        assert output.running == [long_seq]
+        assert long_seq.status == MessageStatus.READY
+        assert next_seq.status == MessageStatus.WAITING
+
+    def test_schedule_prefill_uses_explicit_token_budget(self, block_size, scheduler_config, seq_meta):
+        cache_config = CacheConfig(max_batches=4,
+                                   block_size=block_size,
+                                   num_cpu_blocks=4,
+                                   num_gpu_blocks=4,
+                                   max_prefill_token_num=block_size)
+        scheduler = Scheduler(scheduler_config=scheduler_config, cache_config=cache_config, seq_meta=seq_meta)
+        session = scheduler.add_session(12)
+        seq1 = session.add_sequence(torch.tensor([0] * block_size))
+        seq2 = session.add_sequence(torch.tensor([1] * block_size))
+        seq3 = session.add_sequence(torch.tensor([2] * block_size))
+
+        output = scheduler.schedule(is_prefill=True, token_budget=block_size * 2)
+
+        assert output.running == [seq1, seq2]
+        assert seq1.status == MessageStatus.READY
+        assert seq2.status == MessageStatus.READY
+        assert seq3.status == MessageStatus.WAITING
