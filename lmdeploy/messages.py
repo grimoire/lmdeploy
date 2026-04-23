@@ -412,7 +412,7 @@ class PytorchEngineConfig:
     num_cpu_blocks: int = 0
     num_gpu_blocks: int = 0
     adapters: dict[str, str] = None
-    max_prefill_token_num: int = 4096
+    max_prefill_token_num: int = 8192
     max_num_batched_tokens: int = 0
     thread_safe: bool = False
     enable_prefix_caching: bool = False
