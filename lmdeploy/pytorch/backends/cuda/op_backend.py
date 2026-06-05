@@ -213,6 +213,13 @@ class CudaOpsBackend(DefaultOpsBackend):
         if not step_context.is_decoding:
             kv_start_loc = cu_seqlens_k[:-1].to(kv_seqlens.dtype)
             kv_flatten_size = step_context.sum_kv_seqlen
+            torch._assert_async((q_seqlens >= 0).all())
+            torch._assert_async((kv_seqlens >= 0).all())
+            torch._assert_async((kv_seqlens >= q_seqlens).all())
+            torch._assert_async(kv_seqlens.sum() >= kv_flatten_size)
+            torch._assert_async(cu_seqlens_k[-1] >= kv_flatten_size)
+            if step_context.max_kv_seqlen is not None:
+                torch._assert_async((kv_seqlens <= step_context.max_kv_seqlen).all())
 
         attn_metadata = attn_meta_cls(
             step_context.is_decoding,

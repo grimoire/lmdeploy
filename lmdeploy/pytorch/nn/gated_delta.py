@@ -113,12 +113,21 @@ class CausalConv1dFunc:
             assert weight.size(1) == 1
             weight = weight[:, 0]
 
+        torch._assert_async((conv_idx >= 0).all())
+        torch._assert_async((conv_idx < x.size(1)).all())
+        torch._assert_async((state_ids >= 0).all())
+        torch._assert_async((state_ids < conv_state.size(0)).all())
+
         # Save conv state (last kernel_size input tokens per sequence).
         final_state = x[0, conv_idx].transpose(-2, -1)
 
         # for prefill with spec tokens
         if spec_conv_offsets is not None:
             read_offsets, write_offsets = spec_conv_offsets
+            torch._assert_async((read_offsets >= 0).all())
+            torch._assert_async((read_offsets < conv_state.size(2)).all())
+            torch._assert_async((write_offsets >= 0).all())
+            torch._assert_async((write_offsets < conv_state.size(2)).all())
             # Read directly: conv_state[state_ids[b], :, read_offsets[b, k]]
             # read_offsets: (B, ks), skip first -> all_inits: (B, dim, ks-1)
             all_inits = conv_state[state_ids[:, None, None],
@@ -169,6 +178,10 @@ class CausalConv1dFunc:
         x = x.squeeze(0)
         if is_spec_decoding:
             x = x.unflatten(0, (batch_size, q_seqlen)).transpose(1, 2).contiguous()
+        torch._assert_async((conv_state_indices >= -1).all())
+        torch._assert_async((conv_state_indices < conv_state.size(0)).all())
+        if cache_seqlens is not None:
+            torch._assert_async((cache_seqlens >= 0).all())
         out = self.causal_conv1d_update(
             x,
             conv_state,
@@ -240,6 +253,14 @@ class GatedDelta:
         cache_seqlens = gated_delta_meta.cache_seqlens
 
         if not is_decoding:
+            torch._assert_async((state_ids >= 0).all())
+            torch._assert_async((state_ids < recurrent_state.size(0)).all())
+            if spec_state_offsets is not None:
+                read_offsets, write_offsets = spec_state_offsets
+                torch._assert_async((read_offsets >= 0).all())
+                torch._assert_async((read_offsets < recurrent_state.size(1)).all())
+                torch._assert_async((write_offsets >= 0).all())
+                torch._assert_async((write_offsets < recurrent_state.size(1)).all())
             is_init_token = gated_delta_meta.is_init_token
             # set gate to 0 for init tokens to avoid attention to invalid kv
             g = g.masked_fill(is_init_token[None, :, None], -1e6)
@@ -263,6 +284,11 @@ class GatedDelta:
                 key = key.repeat_interleave(kv_ratio, dim=-2)
             # qkvgb (1, seqlen, ...) -> (B, seqlen, ...)
             batch_size = state_ids.size(0)
+            origin_state_ids = gated_delta_meta.origin_state_ids
+            torch._assert_async((origin_state_ids >= -1).all())
+            torch._assert_async((origin_state_ids < recurrent_state.size(0)).all())
+            if cache_seqlens is not None:
+                torch._assert_async((cache_seqlens >= 0).all())
             core_attn_out, last_recurrent_state = self.impl.fused_recurrent_gated_delta_rule(
                 query[0].unflatten(0, (batch_size, -1)).contiguous(),
                 key[0].unflatten(0, (batch_size, -1)).contiguous(),
@@ -272,7 +298,7 @@ class GatedDelta:
                 initial_state=recurrent_state,
                 output_final_state=True,
                 use_qk_l2norm_in_kernel=self.use_qk_l2norm_in_kernel,
-                state_indices=gated_delta_meta.origin_state_ids,
+                state_indices=origin_state_ids,
                 cache_seqlens=cache_seqlens,
             )
             # out (seqlen, B, ...) -> (1, seqlen * B, ...)
