@@ -125,6 +125,11 @@ with set_envs():
     # executor
     executor_backend = os.getenv('LMDEPLOY_EXECUTOR_BACKEND', None)
 
+    # Maximum seconds for each Ray engine-step phase. Zero disables the timeout.
+    ray_engine_step_timeout = env_to_int('LMDEPLOY_ENGINE_STEP_TIMEOUT', 600)
+    if ray_engine_step_timeout < 0:
+        raise ValueError('LMDEPLOY_ENGINE_STEP_TIMEOUT must be non-negative')
+
     # torch profiler
     torch_profile_cpu = env_to_bool('LMDEPLOY_PROFILE_CPU', False)
     torch_profile_cuda = env_to_bool('LMDEPLOY_PROFILE_CUDA', False)

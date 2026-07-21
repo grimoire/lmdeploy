@@ -164,28 +164,31 @@ class EngineLoop:
 
     async def drain_for_sleep(self):
         """Pause scheduling after the current forward step drains."""
+        if self.stop_event.is_set():
+            raise RuntimeError('Engine loop stopped before sleep drain completed.')
+
         if self._sleep_requested:
             logger.info('EngineLoop sleep drain already requested; waiting for drain point.')
-            await self._main_sleep_drain_event.wait()
+        else:
+            logger.info('EngineLoop sleep drain requested.')
+            self._sleep_requested = True
+            self._main_sleep_drain_event.clear()
             if self.config.role != EngineRole.Hybrid:
-                await self._migration_sleep_drain_event.wait()
-            return
-        logger.info('EngineLoop sleep drain requested.')
-        self._sleep_requested = True
-        self._main_sleep_drain_event.clear()
-        if self.config.role != EngineRole.Hybrid:
-            self._migration_sleep_drain_event.clear()
-        self._sleep_resume_event.clear()
-        # Wake main_loop if it is idle waiting for runnable work, so it can
-        # observe _sleep_requested and acknowledge the drain.
-        self.has_runable_event.event.set()
-        # Wake migration_loop if it is idle on migration_event; it has its own
-        # drain acknowledgement because migration can also touch KV resources.
-        if self.config.role != EngineRole.Hybrid:
-            self.migration_event.set()
+                self._migration_sleep_drain_event.clear()
+            self._sleep_resume_event.clear()
+            # Wake main_loop if it is idle waiting for runnable work, so it can
+            # observe _sleep_requested and acknowledge the drain.
+            self.has_runable_event.event.set()
+            # Wake migration_loop if it is idle on migration_event; it has its
+            # own drain acknowledgement because migration can touch KV resources.
+            if self.config.role != EngineRole.Hybrid:
+                self.migration_event.set()
+
         await self._main_sleep_drain_event.wait()
         if self.config.role != EngineRole.Hybrid:
             await self._migration_sleep_drain_event.wait()
+        if self.stop_event.is_set():
+            raise RuntimeError('Engine loop stopped before sleep drain completed.')
         logger.info('EngineLoop reached sleep drain point.')
 
     def resume_from_sleep(self):
@@ -658,6 +661,10 @@ class EngineLoop:
             return
         self.executor.stop()
         self.stop_event.set()
+        # Wake drain_for_sleep; stop_event distinguishes shutdown from a
+        # completed drain.
+        self._main_sleep_drain_event.set()
+        self._migration_sleep_drain_event.set()
         self.cancel()
 
     def cancel(self):

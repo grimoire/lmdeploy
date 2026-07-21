@@ -262,6 +262,7 @@ class RayExecutor(ExecutorBase):
             self.dag = None
             self._prefetch_task: asyncio.Task = None
             self.remote_outs: asyncio.Queue = None
+            self._workers_aborted = False
 
             logger.info('Init distributed environment by device.')
             self.rank_offset = dist_config.dp_rank * attn_tp
@@ -427,6 +428,38 @@ class RayExecutor(ExecutorBase):
                 except Exception as e:
                     logger.error(f'RayExecutor DP[{dp_rank}] Cancel wait_tasks failed: {e}')
 
+    def _abort_local_workers(self):
+        """Force-stop this DP rank's workers after a fatal step failure."""
+        self._workers_aborted = True
+        for rank, worker in enumerate(self.workers, start=self.rank_offset):
+            try:
+                ray.kill(worker, no_restart=True)
+            except Exception as e:
+                logger.warning('Failed to kill RayExecutor worker rank[%d]: %s', rank, e)
+
+    async def _wait_for_step_phase_or_abort(self, awaitable, phase: str):
+        """Wait for a Ray step phase and abort local workers if it fails."""
+        timeout = _envs.ray_engine_step_timeout
+        try:
+            if timeout == 0:
+                return await awaitable
+            return await asyncio.wait_for(awaitable, timeout=timeout)
+        except ray.exceptions.RayError:
+            # Keep RayError before asyncio.TimeoutError: RayTaskError can inherit
+            # the remote exception type and must not be reported as our deadline.
+            # One failed rank can leave its TP peers stuck in NCCL, so the local
+            # worker group cannot be shut down gracefully after this point.
+            logger.exception('RayExecutor DP[%d] failed while waiting for %s. '
+                             'Killing all local Ray workers.', self.dist_config.dp_rank, phase)
+            self._abort_local_workers()
+            raise
+        except asyncio.TimeoutError as e:
+            error_message = (f'RayExecutor DP[{self.dist_config.dp_rank}] engine step timed out '
+                             f'after {timeout}s while waiting for {phase}')
+            logger.error('%s. Killing all local Ray workers.', error_message)
+            self._abort_local_workers()
+            raise RuntimeError(error_message) from e
+
     def stop(self):
         """Stop engine loop."""
         # TODO: For dp > 1 we currently rely on external teardown (e.g. Ray actor
@@ -434,7 +467,7 @@ class RayExecutor(ExecutorBase):
         # coordinated shutdown across multiple dp ranks is non-trivial, especially
         # when some ranks may have already failed. The explicit stop_async RPC is
         # therefore only issued when dp == 1.
-        if self.dp == 1:
+        if self.dp == 1 and not self._workers_aborted:
             try:
                 # add timeout might disable dump profile
                 # hope this will not lead to hanging
@@ -450,7 +483,7 @@ class RayExecutor(ExecutorBase):
         if _envs.ray_timeline_enable:
             ray.timeline(_envs.ray_timeline_output_path)
 
-        if self.dp == 1:
+        if self.dp == 1 and not self._workers_aborted:
             try:
                 self.collective_rpc('release', timeout=5.0)
                 logger.debug('RayExecutor workers released.')
@@ -488,10 +521,7 @@ class RayExecutor(ExecutorBase):
                 # Await (instead of blocking ray.get) so the engine event loop is yielded while the
                 # previous forward runs. Blocking here stalls the whole loop, starving co-located
                 # async tasks such as the health probe.
-                await asyncio.gather(*self._prev_out)
-            except (SystemExit, ray.exceptions.RayActorError):
-                logger.error('Ray worker exited.')
-                raise
+                await self._wait_for_step_phase_or_abort(asyncio.gather(*self._prev_out), 'worker input dispatch')
             finally:
                 # free ray.put inputs
                 try:
@@ -507,9 +537,9 @@ class RayExecutor(ExecutorBase):
 
     async def get_output_async(self):
         """Get output async."""
-        ret = await self.workers[0].get_outputs.remote()
-        ret = ret.to_tensor()
-        return ret
+        output_ref = self.workers[0].get_outputs.remote()
+        output = await self._wait_for_step_phase_or_abort(output_ref, 'worker output')
+        return output.to_tensor()
 
     @contextlib.contextmanager
     def remote_log(self, msg: str):
